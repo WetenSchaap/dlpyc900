@@ -1,3 +1,7 @@
+"""
+Content of this file is based on Pycrafter 6500 repo, as well as the [dlpc900 user guide](http://www.ti.com/lit/pdf/dlpu018). Some docstrings contain references to pages in this guide.
+"""
+
 import usb.core
 import usb.util
 import time
@@ -5,60 +9,15 @@ import numpy
 import sys
 from dlpyc900.erle import encode
 
-def convlen(a:int|float,l:int) -> str:
-    """
-    Converts a number into a bit string of given length
-
-    Parameters
-    ----------
-    a : int | float
-        number
-    l : int
-        length of bitstring
-
-    Returns
-    -------
-    str
-        bitstring
-    """
-    b=bin(a)[2:]
-    padding=l-len(b)
-    b='0'*padding+b
-    return b
-
-def bitstobytes(a:str) -> bytes:
-    """
-    Convert a bit string into a given number of bytes
-
-    Parameters
-    ----------
-    a : str
-        bitstring (see convlen function)
-
-    Returns
-    -------
-    bytes
-        byte encoded bitstring.
-    """
-    bytelist=[]
-    if len(a)%8!=0:
-        padding=8-len(a)%8
-        a='0'*padding+a
-    for i in range(len(a)//8):
-        bytelist.append(int(a[8*i:8*(i+1)],2))
-
-    bytelist.reverse()
-
-    return bytelist
-
-# alternatives to the above. Better?
-def bitstobytes2(bits: str) -> list[int]:
+def bitstobytes(bits: str) -> list[int]:
     """Convert a string of bits to a list of bytes."""
-    return [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
+    a = [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
+    a.reverse()
+    return a
 
-def convlen2(length: int, bitlen: int) -> str:
-    """Convert length to a binary string of specified bit length."""
-    return format(length, '0{}b'.format(bitlen))
+def convlen(a: int, bitlen: int) -> str:
+    """Convert a number to a binary string of specified bit length."""
+    return format(a, '0{}b'.format(bitlen))
 
 def valid_n_bit(number : int, bits: int) -> bool:
     if type(number) != type(bits) != int:
@@ -79,54 +38,15 @@ class dmd():
         self.ans=[]
         self.current_mode = "pattern"
         self.display_modes = {'video':0, 'pattern':1, 'video-pattern':2, 'otf':3}
-## standard usb command function
+        
+    def __enter__(self):
+        return self
 
-    def command(self,mode:str,sequencebyte:bytes,com1,com2,data=None):
-        buffer = []
+    def __exit__(self, exception_type, exception_value, exception_traceback):
+        # Exception handling could be included here
+        self.standby()
 
-        flagstring=''
-        if mode=='r':
-            flagstring+='1'
-        else:
-            flagstring+='0'        
-        flagstring+='1000000'
-        buffer.append(bitstobytes(flagstring)[0])
-        buffer.append(sequencebyte)
-        temp=bitstobytes(convlen(len(data)+2,16))
-        buffer.append(temp[0])
-        buffer.append(temp[1])
-        buffer.append(com2)
-        buffer.append(com1)
-
-        if len(buffer)+len(data)<65:
-            for i in range(len(data)):
-                buffer.append(data[i])
-            for i in range(64-len(buffer)):
-                buffer.append(0x00)
-            self.dev.write(1, buffer)
-
-        else:
-            for i in range(64-len(buffer)):
-                buffer.append(data[i])
-
-            self.dev.write(1, buffer)
-
-            buffer = []
-
-            j=0
-            while j<len(data)-58:
-                buffer.append(data[j+58])
-                j=j+1
-                if j%64==0:
-                    self.dev.write(1, buffer)
-                    buffer = []
-
-            if j%64!=0:
-                while j%64!=0:
-                    buffer.append(0x00)
-                    j=j+1
-                self.dev.write(1, buffer)                
-        self.ans=self.dev.read(0x81,64)
+## direct communication
 
     def send_command(self, mode: str, sequence_byte: int, command: int, data: list[int] = None):
         """
@@ -178,19 +98,19 @@ class dmd():
                 if len(chunk) < 64:
                     chunk.extend([0x00] * (64 - len(chunk)))
                 self.dev.write(1, chunk)
-
+        # read reply to self.ans
         if mode == 'r':
             self.ans = self.dev.read(0x81, 64)
 
-    def checkforerrors(self):
+    def check_for_errors(self):
         """
         check for error reports in the dlp answer
         """
-        self.command('r',0x22,0x01,0x00,[])
+        self.send_command('r',0x22,0x0100,[])
         if self.ans[6] != 0:
             print( self.ans[6] )
 
-    def readreply(self):
+    def read_reply(self):
         """Print the dlp answer"""
         for i in self.ans:
             print( hex(i) )
@@ -200,12 +120,13 @@ class dmd():
     def lock_displayport(self):
         # page 35? or page 40?
         # run command
-        return 0
-    
+        self.send_command('w',0,0x1A01,[2])
+        self.send_command('w',1,0x1A00,[0,3])
+        
     def set_dual_pixel_mode(self):
         # page 35
         # option 2: Data Port 1-2, Dual Pixel mode. Even pixel on port 1, Odd pixel on port 2
-        return 0
+        self.send_command('w',2,0x1A03,[2,0,0,0])
     
 ## functions for display mode selection
 
@@ -239,7 +160,7 @@ class dmd():
             mode name: can be 'video', 'pattern', 'video-pattern', 'otf'(=on the fly).
         """
         command = 0x1A0A
-        self.command('r', 0x00, command, [])
+        self.send_command('r', 0x00, command, [])
         mode = self.ans[6] & 0x03  # Extract bits 1:0 from the response byte.
         self.current_mode = self.display_modes[mode]
         return self.current_mode
@@ -247,93 +168,94 @@ class dmd():
 ## functions for setting video-pattern mode
 # see page 73 in user guide
 
-    def setup_videopattern(self, exposuretime:int = 15000, channel:str = "red", bitdepth:int = 8):
+    def setup_videopattern(self, exposuretime:int = 15000, channel:int = 1, bitdepth:int = 8):
         """
-        Settings for videopattern
+        Settings for videopattern.
+        WARNING - this will NOT work with the regular send_command parameter
 
         Parameters
         ----------
         exposuretime : int, optional
             on-time of led in a 60hz period flash, by default 15000 µs
-        channel : str, optional
-            what channel to display, by default "red"
+        channel : int, optional
+            what channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
         bitdepth : int, optional
             bitdepth of channel to concider, by default 8
         """
+        raise NotImplementedError("not functional yet!")
         if self.current_mode != 'video-pattern':
             raise ValueError("command can only be run in video-pattern mode.")
         # construct command p 73. 
+        self.send_command('w',1,0x1A34,[0,exposuretime,[0,bitdepth-1,channel,0],0,[1,0]])
         return 0
+
+## Functions to control pattern display
+    def start_pattern(self):
+        """
+        Start pattern display sequence (any mode)
+        """
+        self.send_command('w',5,0x1A24,[2])
+
+    def pause_pattern(self):
+        """
+        Pause pattern display sequence (any mode)
+        """
+        self.send_command('w',5,0x1A24,[1])
+        
+    def stop_pattern(self):
+        """
+        Stop pattern display sequence (any mode)
+        """
+        self.send_command('w',5,0x1A24,[0])
 
 ## functions for idle mode activation
 
     def idle_on(self):
         """Set DMD to idle mode"""
-        self.command('w',0x00,0x02,0x01,[int('00000001',2)])
-        self.checkforerrors()
+        self.stop_pattern()
+        self.send_command('w',0x00,0x0201,[1])
+        self.check_for_errors()
 
     def idle_off(self):
         """Set DMD to active mode/deactivate idle mode"""
-        self.command('w',0x00,0x02,0x01,[int('00000000',2)])
-        self.checkforerrors()
+        self.send_command('w',0x00,0x0201,[3])
+        self.check_for_errors()
 
 ## functions for power management
 
     def standby(self):
         """Set DMD to standby"""
-        self.command('w',0x00,0x02,0x00,[int('00000001',2)])
-        self.checkforerrors()
+        self.stop_pattern()
+        self.send_command('w',0x00,0x0200,[1])
+        self.check_for_errors()
 
     def wakeup(self):
         """Set DMD to wakeup"""
-        self.command('w',0x00,0x02,0x00,[int('00000000',2)])
-        self.checkforerrors()
+        self.send_command('w',0x00,0x0200,[0])
+        self.check_for_errors()
 
     def reset(self):
         """Reset DMD"""
-        self.command('w',0x00,0x02,0x00,[int('00000010',2)])
-        self.checkforerrors()
+        self.send_command('w',0x00,0x0200,[2])
+        self.check_for_errors()
 
 ## test write and read operations, as reported in the dlpc900 programmer's guide
 
-    def testread(self):
-        self.command('r',0xff,0x11,0x00,[])
-        self.readreply()
+    def test_read(self):
+        """
+        Perform read-test
+        """
+        self.send_command('r',0xff,0x1100,[])
+        self.read_reply()
 
-    def testwrite(self):
-        self.command('w',0x22,0x11,0x00,[0xff,0x01,0xff,0x01,0xff,0x01])
-        self.checkforerrors()
+    def test_write(self):
+        """
+        Perform write-test
+        """
+        self.send_command('w',0x22,0x1100,[0xff,0x01,0xff,0x01,0xff,0x01])
+        self.check_for_errors()
 
-## some self explaining functions
-
-    def changemode(self,mode):
-        self.command('w',0x00,0x1a,0x1b,[mode])
-        self.checkforerrors()
-
-    def startsequence(self):
-        self.command('w',0x00,0x1a,0x24,[2])
-        self.checkforerrors()
-
-    def pausesequence(self):
-        self.command('w',0x00,0x1a,0x24,[1])
-        self.checkforerrors()
-
-    def stopsequence(self):
-        self.command('w',0x00,0x1a,0x24,[0])
-        self.checkforerrors()
-
-
-    def configurelut(self,imgnum,repeatnum):
-        img=convlen(imgnum,11)
-        repeat=convlen(repeatnum,32)
-
-        string=repeat+'00000'+img
-
-        bytes=bitstobytes(string)
-
-        self.command('w',0x00,0x1a,0x31,bytes)
-        self.checkforerrors()
-        
+## unused things
 
     def definepattern(self,index,exposure,bitdepth,color,triggerin,darktime,triggerout,patind,bitpos):
         payload=[]
@@ -376,9 +298,8 @@ class dmd():
 
 
 
-        self.command('w',0x00,0x1a,0x34,payload)
-        self.checkforerrors()
-        
+        self.send_command('w',0x00,0x1a34,payload)
+        self.check_for_errors()
 
     def setbmp(self,index,size):
         payload=[]
@@ -395,8 +316,8 @@ class dmd():
         for i in range(len(total)):
             payload.append(total[i])         
         
-        self.command('w',0x00,0x1a,0x2a,payload)
-        self.checkforerrors()
+        self.send_command('w',0x00,0x1a2a,payload)
+        self.check_for_errors()
 
     def bmpload(self,image,size):
         """
@@ -425,11 +346,10 @@ class dmd():
             for j in range(bits):
                 payload.append(image[counter])
                 counter+=1
-            self.command('w',0x11,0x1a,0x2b,payload)
+            self.send_command('w',0x11,0x1a2b,payload)
 
 
-            self.checkforerrors()
-
+            self.check_for_errors()
 
     def defsequence(self,images,exp,ti,dt,to,rep):
 
