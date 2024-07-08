@@ -1,4 +1,4 @@
-import pycrafter6500
+import dlpyc900.dlpyc900 as dlpyc900
 import numpy
 import PIL.Image
 
@@ -7,7 +7,7 @@ images=[]
 
 images.append((numpy.asarray(PIL.Image.open("testimage.tif"))//129))
 
-dlp=pycrafter6500.dmd()
+dlp=dlpyc900.dmd()
 
 dlp.stopsequence()
 

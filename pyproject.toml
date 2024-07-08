@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "dlpyc900"
+version = "0.1.0"
+description = ""
+authors = ["Piet Swinkels <org@swnkls.nl>", "ppozzi", "e841018"]
+readme = "readme.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+numpy = "^1.23.5"
+pyusb = "^1.2.1"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.19.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
