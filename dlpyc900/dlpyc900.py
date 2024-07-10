@@ -391,8 +391,10 @@ class dmd():
             what channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
         bitdepth : int, optional
             bitdepth of channel to concider, by default 8
+        
+        A few other parameters are there as well, but I don't need them/did not look into them, so they are simply set to 0.
         """
-        pattern_index = 0 # Just pick a random number here
+        pattern_index = 0
         pattern_index_bytes = [(pattern_index & 0xFF), ((pattern_index >> 8) & 0xFF)]
         exposuretime_bytes = [(exposuretime & 0xFF), ((exposuretime >> 8) & 0xFF), ((exposuretime >> 16) & 0xFF)]
         byte_5 = 0 | bitdepth-1 | channel | 0
