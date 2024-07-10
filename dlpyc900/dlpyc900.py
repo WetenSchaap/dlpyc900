@@ -18,6 +18,23 @@ byte 4: Length MSB - number of bytes in payload
 byte 5 onward: At least the USB command, followed by any data.
 
 Weirdly, byte 0 is not actually given in the replies from the device as far as I can tell, so remember that when parsing.
+
+To construct a new command, use the manual to find the USB command, lets call this `command`, and what payload is required. If only one input parameter is required in one byte, you can simply use:
+    self.send_command('w', <random number>, command, [input])
+If more, you need to make it a bit more complicated. As an example:
+byte 0 - bit 1:0 : nr between 0 and 3
+       - bit 3:2 : nr between 0 and 3
+       - bit 4: 0 or 1
+       - bit 5: 0 or 1
+       - bit 7:6 reserved.
+Needs the following:
+    payload = 0
+    payload |= 2 & 0x03            # mask input so only the correct bits are used
+    payload |= (0 & 0x03) << 2     # shift to not override.
+    payload |= (0 & 0x01) << 4
+    payload |= (0 & 0x01) << 5
+    self.send_command('w', <random number>, command, payload)
+the mask is 0x01 for one bit, 0x03 for 2 bits, 0x07 for 3 bits, 0x015 for 4 bits, etc. (1,11,111,1111, etc). The shift should be the first bit the number starts on (so if the guide says 4:3, shift needs to be 3)
 """
 
 import usb.core
@@ -93,7 +110,7 @@ class dmd():
 
 ## direct communication
 
-    def send_command(self, mode: str, sequence_byte: int, command: int, data: list[int] = None, check_errors = True):
+    def send_command(self, mode: str, sequence_byte: int, command: int, data: list[int] = None):
         """
         Send a command to the DMD device.
 
@@ -143,9 +160,9 @@ class dmd():
                 if len(chunk) < 64:
                     chunk.extend([0x00] * (64 - len(chunk)))
                 self.dev.write(1, chunk)
-        time.sleep(0.1) # give it some processing time...
         # read reply if required
         if mode == 'r':
+            time.sleep(0.1) # give it some processing time...
             answer = self.dev.read(0x81, 64)
             if not answer[0]:
                 print('DMD reply has error flag set!')
@@ -260,7 +277,7 @@ class dmd():
         """
         check for errors in DMD operation, and raise them if there are any.
         """
-        ans = self.send_command('r', 0x22, 0x0100, [], check_errors=False)
+        ans = self.send_command('r', 0x22, 0x0100, [])
         if len(ans[-1]) == 0:
             # This happens sometimes, idk why?
             # Just pretend all is okay
@@ -296,14 +313,29 @@ class dmd():
 ## functions for parallel interface (to lock an external source) (section 2.3)
     def set_dual_pixel_mode(self):
         """Enable dual pixel mode. See page 35 of user manual."""
-        self.send_command('w',2,0x1A03,[2,0,0,0])
+        payload = 0
+        payload |= 2 & 0x03
+        payload |= (0 & 0x03) << 2
+        payload |= (0 & 0x01) << 4
+        payload |= (0 & 0x01) << 5
+        self.send_command('w', 2, 0x1A03, payload)
 
-    def set_display_to_parallel(self):
+    def set_input_source(self, source:int=0, bitdepth:int=0):
         """
-        Switch display to the parallel interface (so not flash or test)
+        Switch input source for the DMD. You can choose the parallel interface (HDMI/displayport/etc), flash memory, test, or a solid wall of light (a 'curtain').
         See page 35 of user guide.
+
+        Parameters
+        ----------
+        source : int, optional
+            input source: 0 parallel, 1 internal tests, 2 Flash memory, 3 Solid curtain. by default 0
+        bitdepth : int, optional
+            Bit depth for the parallel interface, with: 0 30-bits, 1 24-bits, 2 20-bits, 3 16-bits, by default 0
         """
-        self.send_command('w',1,0x1A00,[0,3])
+        payload = 0
+        payload |= 0 & 0x07
+        payload |= (0 & 0x03) << 3
+        self.send_command('w',1,0x1A00,payload)
 
     def lock_displayport(self):
         """
@@ -312,7 +344,7 @@ class dmd():
         """
         # Power up DisplayPort
         self.send_command('w',0,0x1A01,[2])
-        self.set_display_to_parallel()
+        self.set_input_source()
     
     def lock_hdmi(self):
         """
@@ -321,7 +353,7 @@ class dmd():
         """
         # Power up DisplayPort
         self.send_command('w',0,0x1A01,[1])
-        self.set_display_to_parallel()
+        self.set_input_source()
 
     def lock_release(self):
         """
@@ -330,7 +362,7 @@ class dmd():
         """
         # Power up DisplayPort
         self.send_command('w',0,0x1A01,[0])
-        self.set_display_to_parallel()
+        self.set_input_source()
 
     def check_source_lock(self) -> int:
         """Check if the source is locked, and if yes, via HDMI or DisplayPort. Returns 0 if not locked, 1 if HDMI, 2 if DisplayPort."""
@@ -382,40 +414,8 @@ class dmd():
         self.current_mode = self.display_modes_inv[ans[-1][0]]
         return self.current_mode
     
-## functions for setting Pattern Display LUT (section 2.4.4.3.5)
+## functions for setting Pattern Display LUT (section 2.4.4.3)
 
-    def setup_pattern_LUT(self, exposuretime:int = 15000, darktime:int = 0, color:int = 1, bitdepth:int = 8):
-        """
-        Settings for videopattern.
-        
-        Parameters
-        ----------
-        exposuretime : int, optional, in µs
-            on-time of led in a 60hz period flash, by default 15000 µs
-        darktime : int, optional, in µs
-            off-time of led in a 60hz period flash, by default 0 µs
-        color : int, optional
-            What color channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
-        bitdepth : int, optional
-            bitdepth of channel to concider, by default 8
-        
-        A few other parameters are there as well, but I don't need them/did not look into them, so they are simply set to 0.
-        """
-        pattern_index = 0
-        pattern_index_bytes = [(pattern_index & 0xFF), ((pattern_index >> 8) & 0xFF)]
-        exposuretime_bytes = [(exposuretime & 0xFF), ((exposuretime >> 8) & 0xFF), ((exposuretime >> 16) & 0xFF)]
-        byte_5 = 0 | bitdepth-1 | color | 0
-        darktime_bytes = [(darktime & 0xFF), ((darktime >> 8) & 0xFF), ((darktime >> 16) & 0xFF)]
-        byte_9 = 1 | 0 | 0 
-        image_pattern_index = 0
-        image_pattern_index_bytes = [(image_pattern_index & 0xFF), ((image_pattern_index >> 8) & 0xFF)]
-        bit_position = 0
-        bit_postion_byte = (bit_position & 0x1F) << 3
-        byte_10_11 = [image_pattern_index_bytes[0], (image_pattern_index_bytes[1] | bit_postion_byte)]
-        payload = list(pattern_index_bytes + exposuretime_bytes + [byte_5] + darktime_bytes + [byte_9] + byte_10_11)
-        self.send_command('w',1,0x1A34,payload)
-
-## Functions for Pattern Display (section 2.4.4.3)
     def start_pattern(self):
         """
         Start pattern display sequence (any mode)
@@ -433,6 +433,70 @@ class dmd():
         Stop pattern display sequence (any mode)
         """
         self.send_command('w',5,0x1A24,[0])
+
+    def start_pattern_from_LUT(self, nr_of_LUT_entries:int = 1, nr_of_patterns_to_display:int = 0):
+        """
+        Start displaying patterns from the Look Up Table (LUT), as added in setup_pattern_LUT_definition function. Start at 0, and go through nr_of_LUT_entries. Display a total of nr_of_patterns_to_display. If nr_of_patterns_to_display is set to zero, repeat indefinitly.
+        See section 2.4.4.3.3 
+
+        Parameters
+        ----------
+        nr_of_LUT_entries : int, optional
+            _description_, by default 1
+        nr_of_patterns_to_display : int, optional
+            _description_, by default 0
+        """
+        byte_01 = bits_to_bytes(number_to_bits(nr_of_LUT_entries,10))
+        byte_25 = bits_to_bytes(number_to_bits(nr_of_patterns_to_display,32))
+        payload = byte_01 + byte_25
+        self.send_command('w', 1 ,0x1A31, payload)
+
+    def setup_pattern_LUT_definition(self, pattern_index:int = 0, disable_pattern_2_trigger_out:bool = False, extended_bit_depth:bool = False, exposuretime:int = 15000, darktime:int = 0, color:int = 1, bitdepth:int = 8, image_pattern_index:int = 0, bit_position:int = 1):
+        """
+        Add a pattern to the Look Up Table (LUT), see section 2.4.4.3.5.
+        
+        Parameters
+        ----------
+        pattern_index : int, optional, defaults to 0
+            location in memory to store pattern, should be between 0 and 399.
+        exposuretime : int, optional, in µs
+            on-time of led in a 60hz period flash, by default 15000 µs
+        darktime : int, optional, in µs
+            off-time of led in a 60hz period flash, by default 0 µs
+        color : int, optional
+            What color channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
+        bitdepth : int, optional
+            bitdepth of channel to concider, by default 8
+        image_pattern_index : int, optional
+            index of image pattern to use (if applicable), by default 0
+        bit_position : int, optional
+            Bit position in the image pattern (Frame in video pattern mode). Valid range 0-23. Defaults to 0.
+        
+        A few other parameters are there as well, but I don't need them/did not look into them, so they are simply set to 1.
+        """
+        disable_pattern_2_trigger_out,extended_bit_depth = int(disable_pattern_2_trigger_out),int(extended_bit_depth)
+        clear_after_exposure, wait_for_trigger = 0,0
+        
+        pattern_index_bytes = [(pattern_index & 0xFF), ((pattern_index >> 8) & 0xFF)]
+        exposuretime_bytes = [(exposuretime & 0xFF), ((exposuretime >> 8) & 0xFF), ((exposuretime >> 16) & 0xFF)]
+        
+        byte_5 = 0
+        byte_5 |= clear_after_exposure & 0x01
+        byte_5 |= (bitdepth-1) & 0x07 << 1
+        byte_5 |= (color) & 0x07 << 4
+        byte_5 |= (wait_for_trigger) & 0x01 << 7
+    
+        darktime_bytes = [(darktime & 0xFF), ((darktime >> 8) & 0xFF), ((darktime >> 16) & 0xFF)]
+        
+        byte_9 = 0
+        byte_9 |= disable_pattern_2_trigger_out & 0x01
+        byte_9 |= (extended_bit_depth) & 0x01 << 1
+        
+        image_pattern_index_bytes = [(image_pattern_index & 0xFF), ((image_pattern_index >> 8) & 0xFF)]
+        bit_postion_byte = (bit_position & 0x1F) << 3
+        byte_10_11 = [image_pattern_index_bytes[0], (image_pattern_index_bytes[1] | bit_postion_byte)]
+        payload = list(pattern_index_bytes + exposuretime_bytes + byte_5 + darktime_bytes + byte_9 + byte_10_11)
+        self.send_command('w', 1, 0x1A34, payload)
 
 ## functions for power management (section 2.3.1.1 & 2.3.1.2)
 

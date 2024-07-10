@@ -15,7 +15,7 @@ print(dlp.get_current_powermode())
 #%% setup video mode
 dlp.set_display_mode('video')
 dlp.set_dual_pixel_mode()
-dlp.set_display_to_parallel()
+dlp.set_input_source()
 dlp.lock_displayport()
 print(f"locked to source [{dlp.check_source_lock()}]")
 
