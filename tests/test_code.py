@@ -1,5 +1,6 @@
 #%%
 import dlpyc900.dlpyc900 as dlpyc900
+
 import numpy
 # import PIL.Image
 
@@ -9,29 +10,17 @@ print(dlp.get_display_mode())
 print(f"DMD model is {dlp.get_hardware()[0]}")
 print(dlp.get_main_status())
 print(dlp.get_hardware_status())
-dlp.check_system_status()
-dlp.check_communication_status()
-#%%
-dlp.set_display_mode('pattern')
+print(dlp.get_current_powermode())
 
+#%% setup video mode
+dlp.set_display_mode('video')
+dlp.set_dual_pixel_mode()
+dlp.set_display_to_parallel()
+dlp.lock_displayport()
+print(f"locked to source [{dlp.check_source_lock()}]")
 
-#%%
+#%% Video-pattern setup
 
-images=[]
-
-images.append((numpy.asarray(PIL.Image.open("testimage.tif"))//129))
-
-dlp=dlpyc900.dmd()
-
-dlp.stopsequence()
-
-dlp.changemode(3)
-
-exposure=[1000000]*30
-dark_time=[0]*30
-trigger_in=[False]*30
-trigger_out=[1]*30
-
-dlp.defsequence(images,exposure,trigger_in,dark_time,trigger_out,0)
-
-dlp.startsequence()
+dlp.set_display_mode('video-pattern')
+dlp.setup_pattern_LUT()
+dlp.start_pattern()

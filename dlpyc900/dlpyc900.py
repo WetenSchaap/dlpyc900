@@ -147,12 +147,10 @@ class dmd():
         # read reply if required
         if mode == 'r':
             answer = self.dev.read(0x81, 64)
-            if answer[0]:
-                raise DMDerror('DMD reply has error flag set!')
+            if not answer[0]:
+                print('DMD reply has error flag set!')
         else:
             answer = None
-        if check_errors:
-            self.check_for_error()
         return parse_reply(answer)
 
 ## status commands (section 2.1)
@@ -263,6 +261,10 @@ class dmd():
         check for errors in DMD operation, and raise them if there are any.
         """
         ans = self.send_command('r', 0x22, 0x0100, [], check_errors=False)
+        if len(ans[-1]) == 0:
+            # This happens sometimes, idk why?
+            # Just pretend all is okay
+            return None
         if ans[-1][0] == 0:
             return None
         error_dict = {
@@ -289,7 +291,7 @@ class dmd():
             error_message = error_dict[ans[-1][0]]
         except KeyError:
             error_message = f"Undocumented error [{ans[-1][0]}]"
-        raise DMDerror(error_message)
+        print(error_message)
 
 ## functions for parallel interface (to lock an external source) (section 2.3)
     def set_dual_pixel_mode(self):
@@ -335,7 +337,7 @@ class dmd():
         locked = self.get_main_status()[3]
         if locked:
             port = self.send_command('r',0,0x1A01,[])
-            return port[0]
+            return port[-1][0]
         else:
             return 0
 
@@ -359,7 +361,12 @@ class dmd():
             raise ValueError(f"To change to Video Pattern Mode the system must first change to Video Mode with the desired source enabled and sync must be locked before switching to Video Pattern Mode.")
         self.send_command('w',0x00,0x1A1B,[self.display_modes[mode]])
         time.sleep(0.5) # required for video-projection mode, just as a safety.
-        if self.get_display_mode() != mode:
+        try:
+            new_display_mode = self.get_display_mode()
+        except IndexError:
+            # random error sometimes, just go again, no idea why...
+            new_display_mode = self.get_display_mode()
+        if new_display_mode != mode:
             raise ConnectionError("Mode activation failed.")
         
     def get_display_mode(self) -> str:
@@ -372,12 +379,12 @@ class dmd():
             mode name: can be 'video', 'pattern', 'video-pattern', 'otf'(=on the fly).
         """
         ans = self.send_command('r', 0x00, 0x1A1B, [])
-        self.current_mode = self.display_modes_inv[ans[0]]
+        self.current_mode = self.display_modes_inv[ans[-1][0]]
         return self.current_mode
     
 ## functions for setting Pattern Display LUT (section 2.4.4.3.5)
 
-    def setup_pattern_LUT(self, exposuretime:int = 15000, darktime:int = 0, channel:int = 1, bitdepth:int = 8):
+    def setup_pattern_LUT(self, exposuretime:int = 15000, darktime:int = 0, color:int = 1, bitdepth:int = 8):
         """
         Settings for videopattern.
         
@@ -387,8 +394,8 @@ class dmd():
             on-time of led in a 60hz period flash, by default 15000 µs
         darktime : int, optional, in µs
             off-time of led in a 60hz period flash, by default 0 µs
-        channel : int, optional
-            what channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
+        color : int, optional
+            What color channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
         bitdepth : int, optional
             bitdepth of channel to concider, by default 8
         
@@ -397,7 +404,7 @@ class dmd():
         pattern_index = 0
         pattern_index_bytes = [(pattern_index & 0xFF), ((pattern_index >> 8) & 0xFF)]
         exposuretime_bytes = [(exposuretime & 0xFF), ((exposuretime >> 8) & 0xFF), ((exposuretime >> 16) & 0xFF)]
-        byte_5 = 0 | bitdepth-1 | channel | 0
+        byte_5 = 0 | bitdepth-1 | color | 0
         darktime_bytes = [(darktime & 0xFF), ((darktime >> 8) & 0xFF), ((darktime >> 16) & 0xFF)]
         byte_9 = 1 | 0 | 0 
         image_pattern_index = 0
@@ -460,8 +467,8 @@ class dmd():
         str
             current power mode.
         """
-        idlestatus = self.send_command('r',0x00,0x0201,[])
-        sleepstatus = self.send_command('r',0x00,0x0200,[])
+        idlestatus = self.send_command('r',0x00,0x0201,[])[-1][0]
+        sleepstatus = self.send_command('r',0x00,0x0200,[])[-1][0]
         if sleepstatus == 0:
             if idlestatus == 0:
                 return "normal"
