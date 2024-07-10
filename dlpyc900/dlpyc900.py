@@ -26,7 +26,7 @@ import time
 import numpy
 import sys
 from dlpyc900.erle import encode
-from dlpyc900.errors import *
+from dlpyc900.dlp_errors import *
 import array
 import itertools
 
