@@ -61,7 +61,7 @@ def valid_n_bit(number : int, bits: int) -> bool:
 def parse_reply( reply : array.array ):
     """
     Split up the reply of the DMD into its constituant parts:
-    (error_flag, flag_byte, error_flag, sequence_byte, length, data)
+    (error_flag, flag_byte, sequence_byte, length, data)
     Typically, you only care about the error, and the data.
     """
     if reply == None:
@@ -79,10 +79,7 @@ class dmd():
     """
     def __init__(self):
         self.dev=usb.core.find(idVendor=0x0451 ,idProduct=0xc900 )
-
         self.dev.set_configuration()
-
-        self.ans=[]
         self.current_mode = "pattern"
         self.display_modes = {'video':0, 'pattern':1, 'video-pattern':2, 'otf':3}
         self.display_modes_inv = {0:'video', 1:'pattern', 2:'video-pattern', 3:'otf'}
@@ -96,7 +93,7 @@ class dmd():
 
 ## direct communication
 
-    def send_command(self, mode: str, sequence_byte: int, command: int, data: list[int] = None):
+    def send_command(self, mode: str, sequence_byte: int, command: int, data: list[int] = None, check_errors = True):
         """
         Send a command to the DMD device.
 
@@ -149,11 +146,14 @@ class dmd():
         time.sleep(0.1) # give it some processing time...
         # read reply if required
         if mode == 'r':
-            self.ans = self.dev.read(0x81, 64)
+            answer = self.dev.read(0x81, 64)
+            if answer[0]:
+                raise DMDerror('DMD reply has error flag set!')
         else:
-            self.ans = None
-        self.check_for_error() # check if DMD is still working, while we are here anyway.
-        return parse_reply(self.ans)
+            answer = None
+        if check_errors:
+            self.check_for_error()
+        return parse_reply(answer)
 
 ## status commands (section 2.1)
     def get_hardware_status(self) -> tuple[str, int]:
@@ -250,20 +250,20 @@ class dmd():
         ans = self.send_command('r',10,0x0206,[])
         hw = ans[-1][0]
         fw = ans[-1][1:]
-        hardware_pos = {0x00: "unknown",0x01: "DLP6500", 0x02:"DLP9000", 0x03:"DLP670S", 0x04: "DLP500YX", 0x05: "DLP5500"}
+        hardware_pos = {0x00:"unknown",0x01: "DLP6500", 0x02:"DLP9000", 0x03:"DLP670S", 0x04: "DLP500YX", 0x05: "DLP5500"}
         try:
             hardware = hardware_pos[hw]
         except KeyError:
             hardware = "undocumented hardware"
-        firmware =  ''.join(chr(i) for i in flatten(fw))
+        firmware =  ''.join(chr(i) for i in fw)
         return hardware, firmware
 
     def check_for_error(self):
         """
         check for errors in DMD operation, and raise them if there are any.
         """
-        ans = self.send_command('r',0x22,0x0100,[])
-        if ans[0] == 0:
+        ans = self.send_command('r', 0x22, 0x0100, [], check_errors=False)
+        if ans[-1][0] == 0:
             return None
         error_dict = {
             1  : "Batch file checksum error",
@@ -286,9 +286,9 @@ class dmd():
             255: "Internal Error",
         }
         try:
-            error_message = error_dict[ans[0]]
+            error_message = error_dict[ans[-1][0]]
         except KeyError:
-            error_message = f"Undocumented error [{ans[0]}]"
+            error_message = f"Undocumented error [{ans[-1][0]}]"
         raise DMDerror(error_message)
 
 ## functions for parallel interface (to lock an external source) (section 2.3)

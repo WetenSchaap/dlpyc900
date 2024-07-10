@@ -6,9 +6,11 @@ import numpy
 #%% test reading some properties
 dlp=dlpyc900.dmd()
 print(dlp.get_display_mode())
-print(dlp.ans)
-print(dlpyc900.parse_reply(dlp.ans))
-
+print(f"DMD model is {dlp.get_hardware()[0]}")
+print(dlp.get_main_status())
+print(dlp.get_hardware_status())
+dlp.check_system_status()
+dlp.check_communication_status()
 #%%
 dlp.set_display_mode('pattern')
 
