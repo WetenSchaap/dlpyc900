@@ -1,5 +1,23 @@
 """
 Content of this file is based on Pycrafter 6500 repo, as well as the [dlpc900 user guide](http://www.ti.com/lit/pdf/dlpu018). Some docstrings contain references to pages in this guide.
+
+In general, all commands and replies have the same structure:
+
+byte 0: report ID, set to 0
+## Header bytes
+byte 1: flag byte
+    bit 7: read/write
+    bit 6: reply
+    bit 5: error
+    bit 4:3: reserved
+    bit 2:1: destination
+byte 2: sequence byte - replies to a message will match sequence bytes of it
+byte 3: Length LSB - number of bytes in payload
+byte 4: Length MSB - number of bytes in payload
+## Payload bytes
+byte 5 onward: At least the USB command, followed by any data.
+
+Weirdly, byte 0 is not actually given in the replies from the device, as far as I can tell, so remember theat when parsing.
 """
 
 import usb.core
@@ -8,6 +26,7 @@ import time
 import numpy
 import sys
 from dlpyc900.erle import encode
+import array
 
 def bitstobytes(bits: str) -> list[int]:
     """Convert a string of bits to a list of bytes."""
@@ -26,6 +45,22 @@ def valid_n_bit(number : int, bits: int) -> bool:
         raise ValueError("Number and bits should be positive")
     return number < 2**bits
 
+def parse_reply( reply : array.array ):
+    """
+    Split up the reply of the DMD into its constituant parts:
+    (report_id, flag_byte, error_flag, sequence_byte, length, data)
+    Typically, you only care about the error, and the data.
+    """
+    flag_byte = number_to_bits(reply[0])
+    sequence_byte = reply[1]
+    length = reply[2] | (reply[3] << 8)  # Combine two bytes to form the length
+    data = reply[4:4+length]
+    error_flag = (reply[0] & 0x20) != 0
+    return error_flag, flag_byte, sequence_byte, length, tuple(data)
+
+def number_to_bits( nr:int ) -> str:
+    return format(nr, '08b')
+
 class dmd():
     """
     DMD controller class
@@ -38,6 +73,7 @@ class dmd():
         self.ans=[]
         self.current_mode = "pattern"
         self.display_modes = {'video':0, 'pattern':1, 'video-pattern':2, 'otf':3}
+        self.display_modes_inv = {0:'video', 1:'pattern', 2:'video-pattern', 3:'otf'}
         
     def __enter__(self):
         return self
@@ -100,6 +136,7 @@ class dmd():
                 self.dev.write(1, chunk)
         # read reply to self.ans
         if mode == 'r':
+            time.sleep(0.4)
             self.ans = self.dev.read(0x81, 64)
 
     def check_for_errors(self):
@@ -114,6 +151,10 @@ class dmd():
         """Print the dlp answer"""
         for i in self.ans:
             print( hex(i) )
+
+## status commands
+    def get_main_status(self):
+        self.send_command('r',10,0x1A0C,[])
 
 ## function to lock source correctly (hopefully)
 ### See page 40 of userguide. maybe page 34 is also related, but not sure.
@@ -159,10 +200,10 @@ class dmd():
         mode : str
             mode name: can be 'video', 'pattern', 'video-pattern', 'otf'(=on the fly).
         """
-        command = 0x1A0A
+        command = 0x1A1B
         self.send_command('r', 0x00, command, [])
         mode = self.ans[6] & 0x03  # Extract bits 1:0 from the response byte.
-        self.current_mode = self.display_modes[mode]
+        self.current_mode = self.display_modes_inv[mode]
         return self.current_mode
     
 ## functions for setting video-pattern mode

@@ -1,7 +1,19 @@
+#%%
 import dlpyc900.dlpyc900 as dlpyc900
 import numpy
-import PIL.Image
+# import PIL.Image
 
+#%% test reading some properties
+dlp=dlpyc900.dmd()
+print(dlp.get_display_mode())
+print(dlp.ans)
+print(dlpyc900.parse_reply(dlp.ans))
+
+#%%
+dlp.set_display_mode('pattern')
+
+
+#%%
 
 images=[]
 

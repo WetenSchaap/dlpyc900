@@ -1,4 +1,5 @@
 
+This is all based on https://www.ti.com/lit/ug/dlpu018j/dlpu018j.pdf
 
 Pycrafter 6500 is a native Python controller for Texas Instruments' dlplcr6500evm evaluation module for DLP displays.
 The script is compatible with Python 2.x, and should work up to version 3.8 thanks to the kind controbution of Guangyuan Zhao (https://github.com/zhaoguangyuan123). 
@@ -65,3 +66,20 @@ trigger in: python list or numpy array of boolean values determing wheter to wai
 dark time: python list or numpy array with the dark times in microseconds after each image. Length must be equal to the images list.
 trigger out: python list or numpy array of boolean values determing wheter to emit an external trigger after exposure. Length must be equal to the images list.
 repetitions: number of repetitions of the sequence. set to 0 for infinite loop.
+
+## install requirements
+
+To use, use libusb driver:
+- plugged in the usb cable
+- opened Zadig
+- Selected "List all devices"
+- Select DLPC900
+- Selected the "libusb-win32" driver
+- Pressed the "Replace driver" button
+- run the Python script
+
+Howerver, normal gui CANNOT work anymore if you do that.
+
+To go back to normal control:
+Hi Bow,
+I came back to this problem and managed to get the GUI working again. The way to do was, with the projector connected over USB, to go to device manager and uninstall the libusb driver, but when the confirmation window comes up, to make sure to check the box to also remove driver software. Afterwards, unplugging and replugging the USB cable properly installed the USB driver to work with LCR4500 GUI.
