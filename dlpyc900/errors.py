@@ -1,0 +1,2 @@
+class DMDerror(Exception):
+    pass

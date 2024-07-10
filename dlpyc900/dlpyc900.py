@@ -17,7 +17,7 @@ byte 4: Length MSB - number of bytes in payload
 ## Payload bytes
 byte 5 onward: At least the USB command, followed by any data.
 
-Weirdly, byte 0 is not actually given in the replies from the device, as far as I can tell, so remember theat when parsing.
+Weirdly, byte 0 is not actually given in the replies from the device as far as I can tell, so remember that when parsing.
 """
 
 import usb.core
@@ -26,17 +26,30 @@ import time
 import numpy
 import sys
 from dlpyc900.erle import encode
+from dlpyc900.errors import *
 import array
+import itertools
 
-def bitstobytes(bits: str) -> list[int]:
+def flatten(nested_list : list[list]) -> list:
+    """
+    Flatten a list of lists. 
+    See [this stackoverflow topic](https://stackoverflow.com/questions/952914/how-do-i-make-a-flat-list-out-of-a-list-of-lists).
+    """
+    return list(itertools.chain(*nested_list))
+
+def bits_to_bytes(bits: str) -> list[int]:
     """Convert a string of bits to a list of bytes."""
     a = [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
     a.reverse()
     return a
 
-def convlen(a: int, bitlen: int) -> str:
+def number_to_bits(a: int, bitlen: int=8) -> str:
     """Convert a number to a binary string of specified bit length."""
     return format(a, '0{}b'.format(bitlen))
+
+def bits_to_bools(a : str) -> tuple[int,...]:
+    """Convert str of bits ('01101') to tuple of ints (0,1,1,0,1)"""
+    return tuple(map(int,a))
 
 def valid_n_bit(number : int, bits: int) -> bool:
     if type(number) != type(bits) != int:
@@ -48,18 +61,17 @@ def valid_n_bit(number : int, bits: int) -> bool:
 def parse_reply( reply : array.array ):
     """
     Split up the reply of the DMD into its constituant parts:
-    (report_id, flag_byte, error_flag, sequence_byte, length, data)
+    (error_flag, flag_byte, error_flag, sequence_byte, length, data)
     Typically, you only care about the error, and the data.
     """
+    if reply == None:
+        return None
     flag_byte = number_to_bits(reply[0])
     sequence_byte = reply[1]
     length = reply[2] | (reply[3] << 8)  # Combine two bytes to form the length
     data = reply[4:4+length]
     error_flag = (reply[0] & 0x20) != 0
     return error_flag, flag_byte, sequence_byte, length, tuple(data)
-
-def number_to_bits( nr:int ) -> str:
-    return format(nr, '08b')
 
 class dmd():
     """
@@ -103,13 +115,13 @@ class dmd():
         # Flag Byte
         flag_string = '1' if mode == 'r' else '0'
         flag_string += '1000000'
-        buffer.append(bitstobytes(flag_string)[0])
+        buffer.append(bits_to_bytes(flag_string)[0])
 
         # Sequence Byte
         buffer.append(sequence_byte)
 
         # Length Bytes (payload length + 2 command bytes)
-        temp = bitstobytes(convlen(len(data) + 2, 16))
+        temp = bits_to_bytes(number_to_bits(len(data) + 2, 16))
         buffer.append(temp[0])
         buffer.append(temp[1])
 
@@ -134,42 +146,201 @@ class dmd():
                 if len(chunk) < 64:
                     chunk.extend([0x00] * (64 - len(chunk)))
                 self.dev.write(1, chunk)
-        # read reply to self.ans
+        time.sleep(0.1) # give it some processing time...
+        # read reply if required
         if mode == 'r':
-            time.sleep(0.4)
             self.ans = self.dev.read(0x81, 64)
+        else:
+            self.ans = None
+        self.check_for_error() # check if DMD is still working, while we are here anyway.
+        return parse_reply(self.ans)
 
-    def check_for_errors(self):
+## status commands (section 2.1)
+    def get_hardware_status(self) -> tuple[str, int]:
         """
-        check for error reports in the dlp answer
+        Generate report on hardware status
+
+        Returns
+        -------
+        tuple[str, int]
+            First element is report for printing. Second element indicates number of errors found.
         """
-        self.send_command('r',0x22,0x0100,[])
-        if self.ans[6] != 0:
-            print( self.ans[6] )
-
-    def read_reply(self):
-        """Print the dlp answer"""
-        for i in self.ans:
-            print( hex(i) )
-
-## status commands
-    def get_main_status(self):
-        self.send_command('r',10,0x1A0C,[])
-
-## function to lock source correctly (hopefully)
-### See page 40 of userguide. maybe page 34 is also related, but not sure.
-    def lock_displayport(self):
-        # page 35? or page 40?
-        # run command
-        self.send_command('w',0,0x1A01,[2])
-        self.send_command('w',1,0x1A00,[0,3])
-        
-    def set_dual_pixel_mode(self):
-        # page 35
-        # option 2: Data Port 1-2, Dual Pixel mode. Even pixel on port 1, Odd pixel on port 2
-        self.send_command('w',2,0x1A03,[2,0,0,0])
+        ans = self.send_command('r',10,0x1A0A,[])
+        ansbit = number_to_bits(ans[-1][0],8)
+        statusmessage = ''
+        errors = 0
+        if ansbit[0] == "0":
+            statusmessage += "Internal Initialization Error\n"
+            errors += 1
+        elif ansbit[0] == "1":
+            statusmessage += "Internal Initialization Successful\n"
+        if ansbit[1] == "0":
+            statusmessage += "System is compatible\n"
+        elif ansbit[1] == "1":
+            statusmessage += "Incompatible Controller or DMD, or wrong firmware loaded on system\n"
+            errors += 1
+        if ansbit[2] == "0":
+            statusmessage += "DMD Reset Controller has no errors\n"
+        elif ansbit[2] == "1":
+            statusmessage += "DMD Reset Controller Error: Multiple overlapping bias or reset operations are accessing the same DMD block\n"
+            errors += 1
+        if ansbit[3] == "0":
+            statusmessage += "No Forced Swap Errors\n"
+        elif ansbit[3] == "1":
+            statusmessage += "Forced Swap Error occurred\n"
+            errors += 1
+        if ansbit[4] == "0":
+            statusmessage += "No Secondary Controller Present\n"
+        elif ansbit[4] == "1":
+            statusmessage += "Secondary Controller Present and Ready\n"
+        if ansbit[6] == "0":
+            statusmessage += "Sequencer Abort Status reports no errors\n"
+        elif ansbit[6] == "1":
+            statusmessage += "Sequencer has detected an error condition that caused an abort\n"
+            errors += 1
+        if ansbit[7] == "0":
+            statusmessage += "Sequencer reports no errors\n"
+        elif ansbit[7] == "1":
+            statusmessage += "Sequencer detected an error\n"
+            errors += 1
+        return statusmessage, errors
     
-## functions for display mode selection
+    def check_communication_status(self):
+        """Check communication with DMD. Raise error when communication is not possible."""
+        ans = self.send_command('r',10,0x1A49,[])
+        ansbit = number_to_bits(ans[-1][0],8)
+        if not (ansbit[0] == ansbit[2] == 0):
+            raise DMDerror("Controller cannot communicate with DMD")
+    
+    def check_system_status(self):
+        "Check system for internal memory errors. Raise error if I find one."
+        ans = self.send_command('r',10,0x1A0B,[])
+        ansbit = number_to_bits(ans[-1][0],8)
+        if ansbit[0] == 0:
+            raise DMDerror("Internal Memory Test failed")
+    
+    def get_main_status(self) -> tuple[int,int,int,int,int,int]:
+        """
+        Get main status of DMD.
+
+        Returns
+        -------
+        tuple[int,int,int,int,int,int]
+            Each index indicates something about the DMD:
+            0: 0 - micromirrors are not parked, 1 - micromirrors are parked
+            1: 0 - sequencer is stopped, 1 - sequencer is running
+            2: 0 - video is running, 1 - video is frozen (displaying single frame)
+            3: 0 - external source not locked, 1 - external source locked
+            4: 0 - port 1 syncs not valid, 1 - port 1 syncs valid
+            5: 0 - port 2 syncs not valid, 1 - port 2 syncs valid
+        """
+        ans = self.send_command('r',10,0x1A0C,[])
+        ansbit = number_to_bits(ans[-1][0],8)
+        return bits_to_bools(ansbit)[:6] 
+ 
+    def get_hardware(self) -> tuple[str,str]:
+        """
+        Get hardware product code and firmware tag info
+
+        Returns
+        -------
+        tuple[str,str]
+            First element is hardware product code, second element is the 31 byte ASCII firmware tag information 
+        """
+        ans = self.send_command('r',10,0x0206,[])
+        hw = ans[-1][0]
+        fw = ans[-1][1:]
+        hardware_pos = {0x00: "unknown",0x01: "DLP6500", 0x02:"DLP9000", 0x03:"DLP670S", 0x04: "DLP500YX", 0x05: "DLP5500"}
+        try:
+            hardware = hardware_pos[hw]
+        except KeyError:
+            hardware = "undocumented hardware"
+        firmware =  ''.join(chr(i) for i in flatten(fw))
+        return hardware, firmware
+
+    def check_for_error(self):
+        """
+        check for errors in DMD operation, and raise them if there are any.
+        """
+        ans = self.send_command('r',0x22,0x0100,[])
+        if ans[0] == 0:
+            return None
+        error_dict = {
+            1  : "Batch file checksum error",
+            2  : "Device failure",
+            3  : "Invalid command number",
+            4  : "Incompatible controller and DMD combination",
+            5  : "Command not allowed in current mode",
+            6  : "Invalid command parameter",
+            7  : "Item referred by the parameter is not present",
+            8  : "Out of resource (RAM or Flash)",
+            9  : "Invalid BMP compression type",
+            10 : "Pattern bit number out of range",
+            11 : "Pattern BMP not present in flash",
+            12 : "Pattern dark time is out of range",
+            13 : "Signal delay parameter is out of range",
+            14 : "Pattern exposure time is out of range",
+            15 : "Pattern number is out of range",
+            16 : "Invalid pattern definition (errors other than 9-15)",
+            17 : "Pattern image memory address is out of range",
+            255: "Internal Error",
+        }
+        try:
+            error_message = error_dict[ans[0]]
+        except KeyError:
+            error_message = f"Undocumented error [{ans[0]}]"
+        raise DMDerror(error_message)
+
+## functions for parallel interface (to lock an external source) (section 2.3)
+    def set_dual_pixel_mode(self):
+        """Enable dual pixel mode. See page 35 of user manual."""
+        self.send_command('w',2,0x1A03,[2,0,0,0])
+
+    def set_display_to_parallel(self):
+        """
+        Switch display to the parallel interface (so not flash or test)
+        See page 35 of user guide.
+        """
+        self.send_command('w',1,0x1A00,[0,3])
+
+    def lock_displayport(self):
+        """
+        Lock external source over DisplayPort connection. 
+        See page 40/41 of user guide.
+        """
+        # Power up DisplayPort
+        self.send_command('w',0,0x1A01,[2])
+        self.set_display_to_parallel()
+    
+    def lock_hdmi(self):
+        """
+        Lock external source over HDMI connection. 
+        See page 40/41 of user guide.
+        """
+        # Power up DisplayPort
+        self.send_command('w',0,0x1A01,[1])
+        self.set_display_to_parallel()
+
+    def lock_release(self):
+        """
+        Remove lock to external source. 
+        See page 40/41 of user guide.
+        """
+        # Power up DisplayPort
+        self.send_command('w',0,0x1A01,[0])
+        self.set_display_to_parallel()
+
+    def check_source_lock(self) -> int:
+        """Check if the source is locked, and if yes, via HDMI or DisplayPort. Returns 0 if not locked, 1 if HDMI, 2 if DisplayPort."""
+        locked = self.get_main_status()[3]
+        if locked:
+            port = self.send_command('r',0,0x1A01,[])
+            return port[0]
+        else:
+            return 0
+
+## functions for display mode (section 2.4)
+### functions for display mode selection (section 2.4.1)
 
     def set_display_mode(self, mode: str):
         """
@@ -200,37 +371,42 @@ class dmd():
         mode : str
             mode name: can be 'video', 'pattern', 'video-pattern', 'otf'(=on the fly).
         """
-        command = 0x1A1B
-        self.send_command('r', 0x00, command, [])
-        mode = self.ans[6] & 0x03  # Extract bits 1:0 from the response byte.
-        self.current_mode = self.display_modes_inv[mode]
+        ans = self.send_command('r', 0x00, 0x1A1B, [])
+        self.current_mode = self.display_modes_inv[ans[0]]
         return self.current_mode
     
-## functions for setting video-pattern mode
-# see page 73 in user guide
+## functions for setting Pattern Display LUT (section 2.4.4.3.5)
 
-    def setup_videopattern(self, exposuretime:int = 15000, channel:int = 1, bitdepth:int = 8):
+    def setup_pattern_LUT(self, exposuretime:int = 15000, darktime:int = 0, channel:int = 1, bitdepth:int = 8):
         """
         Settings for videopattern.
-        WARNING - this will NOT work with the regular send_command parameter
-
+        
         Parameters
         ----------
-        exposuretime : int, optional
+        exposuretime : int, optional, in µs
             on-time of led in a 60hz period flash, by default 15000 µs
+        darktime : int, optional, in µs
+            off-time of led in a 60hz period flash, by default 0 µs
         channel : int, optional
             what channel to display, with 0: none, 1: red, 2: green, 3: red & green, 4: blue, 5: blue+red, 6: blue+green, 7: red+green+blue, by default "1"
         bitdepth : int, optional
             bitdepth of channel to concider, by default 8
         """
-        raise NotImplementedError("not functional yet!")
-        if self.current_mode != 'video-pattern':
-            raise ValueError("command can only be run in video-pattern mode.")
-        # construct command p 73. 
-        self.send_command('w',1,0x1A34,[0,exposuretime,[0,bitdepth-1,channel,0],0,[1,0]])
-        return 0
+        pattern_index = 0 # Just pick a random number here
+        pattern_index_bytes = [(pattern_index & 0xFF), ((pattern_index >> 8) & 0xFF)]
+        exposuretime_bytes = [(exposuretime & 0xFF), ((exposuretime >> 8) & 0xFF), ((exposuretime >> 16) & 0xFF)]
+        byte_5 = 0 | bitdepth-1 | channel | 0
+        darktime_bytes = [(darktime & 0xFF), ((darktime >> 8) & 0xFF), ((darktime >> 16) & 0xFF)]
+        byte_9 = 1 | 0 | 0 
+        image_pattern_index = 0
+        image_pattern_index_bytes = [(image_pattern_index & 0xFF), ((image_pattern_index >> 8) & 0xFF)]
+        bit_position = 0
+        bit_postion_byte = (bit_position & 0x1F) << 3
+        byte_10_11 = [image_pattern_index_bytes[0], (image_pattern_index_bytes[1] | bit_postion_byte)]
+        payload = list(pattern_index_bytes + exposuretime_bytes + [byte_5] + darktime_bytes + [byte_9] + byte_10_11)
+        self.send_command('w',1,0x1A34,payload)
 
-## Functions to control pattern display
+## Functions for Pattern Display (section 2.4.4.3)
     def start_pattern(self):
         """
         Start pattern display sequence (any mode)
@@ -249,69 +425,67 @@ class dmd():
         """
         self.send_command('w',5,0x1A24,[0])
 
-## functions for idle mode activation
-
-    def idle_on(self):
-        """Set DMD to idle mode"""
-        self.stop_pattern()
-        self.send_command('w',0x00,0x0201,[1])
-        self.check_for_errors()
-
-    def idle_off(self):
-        """Set DMD to active mode/deactivate idle mode"""
-        self.send_command('w',0x00,0x0201,[3])
-        self.check_for_errors()
-
-## functions for power management
+## functions for power management (section 2.3.1.1 & 2.3.1.2)
 
     def standby(self):
         """Set DMD to standby"""
         self.stop_pattern()
         self.send_command('w',0x00,0x0200,[1])
-        self.check_for_errors()
 
     def wakeup(self):
         """Set DMD to wakeup"""
         self.send_command('w',0x00,0x0200,[0])
-        self.check_for_errors()
 
     def reset(self):
         """Reset DMD"""
         self.send_command('w',0x00,0x0200,[2])
-        self.check_for_errors()
 
-## test write and read operations, as reported in the dlpc900 programmer's guide
+    def idle_on(self):
+        """Set DMD to idle mode"""
+        self.stop_pattern()
+        self.send_command('w',0x00,0x0201,[1])
 
-    def test_read(self):
-        """
-        Perform read-test
-        """
-        self.send_command('r',0xff,0x1100,[])
-        self.read_reply()
+    def idle_off(self):
+        """Set DMD to active mode/deactivate idle mode"""
+        self.send_command('w',0x00,0x0201,[3])
 
-    def test_write(self):
+    def get_current_powermode(self) -> str:
         """
-        Perform write-test
-        """
-        self.send_command('w',0x22,0x1100,[0xff,0x01,0xff,0x01,0xff,0x01])
-        self.check_for_errors()
+        Get the current power mode of the DMD. Options are normal, idle, or standby.
 
-## unused things
+        Returns
+        -------
+        str
+            current power mode.
+        """
+        idlestatus = self.send_command('r',0x00,0x0201,[])
+        sleepstatus = self.send_command('r',0x00,0x0200,[])
+        if sleepstatus == 0:
+            if idlestatus == 0:
+                return "normal"
+            elif idlestatus == 1:
+                return "idle"
+        elif sleepstatus == 1:
+            return "standby"
+        else:
+            return "undocumented state"
+
+## pattern on the fly commands
 
     def definepattern(self,index,exposure,bitdepth,color,triggerin,darktime,triggerout,patind,bitpos):
         payload=[]
-        index=convlen(index,16)
-        index=bitstobytes(index)
+        index=number_to_bits(index,16)
+        index=bits_to_bytes(index)
         for i in range(len(index)):
             payload.append(index[i])
 
-        exposure=convlen(exposure,24)
-        exposure=bitstobytes(exposure)
+        exposure=number_to_bits(exposure,24)
+        exposure=bits_to_bytes(exposure)
         for i in range(len(exposure)):
             payload.append(exposure[i])
         optionsbyte=''
         optionsbyte+='1'
-        bitdepth=convlen(bitdepth-1,3)
+        bitdepth=number_to_bits(bitdepth-1,3)
         optionsbyte=bitdepth+optionsbyte
         optionsbyte=color+optionsbyte
         if triggerin:
@@ -319,21 +493,21 @@ class dmd():
         else:
             optionsbyte='0'+optionsbyte
 
-        payload.append(bitstobytes(optionsbyte)[0])
+        payload.append(bits_to_bytes(optionsbyte)[0])
 
-        darktime=convlen(darktime,24)
-        darktime=bitstobytes(darktime)
+        darktime=number_to_bits(darktime,24)
+        darktime=bits_to_bytes(darktime)
         for i in range(len(darktime)):
             payload.append(darktime[i])
 
-        triggerout=convlen(triggerout,8)
-        triggerout=bitstobytes(triggerout)
+        triggerout=number_to_bits(triggerout,8)
+        triggerout=bits_to_bytes(triggerout)
         payload.append(triggerout[0])
 
-        patind=convlen(patind,11)
-        bitpos=convlen(bitpos,5)
+        patind=number_to_bits(patind,11)
+        bitpos=number_to_bits(bitpos,5)
         lastbits=bitpos+patind
-        lastbits=bitstobytes(lastbits)
+        lastbits=bits_to_bytes(lastbits)
         for i in range(len(lastbits)):
             payload.append(lastbits[i])
 
@@ -345,15 +519,15 @@ class dmd():
     def setbmp(self,index,size):
         payload=[]
 
-        index=convlen(index,5)
+        index=number_to_bits(index,5)
         index='0'*11+index
-        index=bitstobytes(index)
+        index=bits_to_bytes(index)
         for i in range(len(index)):
             payload.append(index[i]) 
 
 
-        total=convlen(size,32)
-        total=bitstobytes(total)
+        total=number_to_bits(size,32)
+        total=bits_to_bytes(total)
         for i in range(len(total)):
             payload.append(total[i])         
         
@@ -376,12 +550,12 @@ class dmd():
                 print (i,packnum)
             payload=[]
             if i<packnum-1:
-                leng=convlen(504,16)
+                leng=number_to_bits(504,16)
                 bits=504
             else:
-                leng=convlen(size%504,16)
+                leng=number_to_bits(size%504,16)
                 bits=size%504
-            leng=bitstobytes(leng)
+            leng=bits_to_bytes(leng)
             for j in range(2):
                 payload.append(leng[j])
             for j in range(bits):
