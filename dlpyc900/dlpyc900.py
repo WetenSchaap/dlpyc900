@@ -14,13 +14,6 @@ from dlpyc900.dlp_errors import *
 import array
 import itertools
 
-def flatten(nested_list : list[list]) -> list:
-    """
-    Flatten a list of lists. 
-    See [this stackoverflow topic](https://stackoverflow.com/questions/952914/how-do-i-make-a-flat-list-out-of-a-list-of-lists).
-    """
-    return list(itertools.chain(*nested_list))
-
 def bits_to_bytes(bits: str) -> list[int]:
     """Convert a string of bits to a list of bytes."""
     a = [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
@@ -35,18 +28,11 @@ def bits_to_bools(a : str) -> tuple[int,...]:
     """Convert str of bits ('01101') to tuple of ints (0,1,1,0,1)"""
     return tuple(map(int,a))
 
-def valid_n_bit(number : int, bits: int) -> bool:
-    if type(number) != type(bits) != int:
-        raise ValueError("Number and bits should be ints")
-    if number < 0 or bits < 0:
-        raise ValueError("Number and bits should be positive")
-    return number < 2**bits
-
-def parse_reply( reply : array.array ):
+def parse_reply( reply : array.array[bool,int,int,int,tuple[int,...]] ):
     """
     Split up the reply of the DMD into its constituant parts:
     (error_flag, flag_byte, sequence_byte, length, data)
-    Typically, you only care about the error, and the data.
+    Typically, you only care about the error, sequence_byte and the data.
     """
     if reply == None:
         return None
@@ -67,6 +53,11 @@ class dmd():
         self.current_mode = "pattern"
         self.display_modes = {'video':0, 'pattern':1, 'video-pattern':2, 'otf':3}
         self.display_modes_inv = {0:'video', 1:'pattern', 2:'video-pattern', 3:'otf'}
+        # lets check if connection actually works:
+        try:
+            self.hardware = self.get_hardware()[0]
+        except DMDerror:
+            raise DMDerror("Connection to dmd was not succesfull")
         
     def __enter__(self):
         return self
@@ -77,19 +68,23 @@ class dmd():
 
 ## direct communication
 
-    def send_command(self, mode: str, sequence_byte: int, command: int, data: list[int] = None):
+    def send_command(self, mode: str, sequence_byte: int, command: int, payload: list[int] = None):
         """
         Send a command to the DMD device.
-
-        :param mode: 'r' for read, 'w' for write
-        :param sequence_byte: A byte to identify the command sequence, so you know what reply belongs to what command. Choose arbitrary number, like 0x00. do not re-use.
-        :param command: The command to be sent (16-bit integer), so for instance '0x0200'
-        :param data: List of data bytes associated with the command. Often just one to set a mode, e.g. [1] for option 1. If more complex, you need to craft the bytes yourself.
         
-        In all these cases you can give the hexidecimal number (like 0x1A1B) or the normal one (6683), Python does not care.
+        Parameters
+        ----------
+        mode : char
+            'r' for read, 'w' for write
+        sequence_byte : int
+            A byte to identify the command sequence, so you know what reply belongs to what command. Choose arbitrary number that fits in 1 byte.
+        command : int
+            The command to be sent (16-bit integer), as found in the user guide. For instance '0x0200'
+        payload : int, optional
+            List of data bytes associated with the command. Leave empty when reading. Often just a simple number to set a mode, e.g. [1] for option 1. If more complex, you need to craft the byte(s) yourself.
         """
-        if data is None:
-            data = []
+        if payload is None:
+            payload = []
 
         buffer = []
 
@@ -102,7 +97,7 @@ class dmd():
         buffer.append(sequence_byte)
 
         # Length Bytes (payload length + 2 command bytes)
-        temp = bits_to_bytes(number_to_bits(len(data) + 2, 16))
+        temp = bits_to_bytes(number_to_bits(len(payload) + 2, 16))
         buffer.append(temp[0])
         buffer.append(temp[1])
 
@@ -111,12 +106,12 @@ class dmd():
         buffer.append((command >> 8) & 0xFF)  # Upper byte
 
         # Add data to buffer
-        if len(buffer) + len(data) < 65:
-            buffer.extend(data)
+        if len(buffer) + len(payload) < 65:
+            buffer.extend(payload)
             buffer.extend([0x00] * (64 - len(buffer)))
             self.dev.write(1, buffer)
         else:
-            remaining_data = data
+            remaining_data = payload
             buffer.extend(remaining_data[:58])
             self.dev.write(1, buffer)
             remaining_data = remaining_data[58:]
@@ -132,7 +127,7 @@ class dmd():
             time.sleep(0.1) # give it some processing time...
             answer = self.dev.read(0x81, 64)
             if not answer[0]:
-                print('DMD reply has error flag set!')
+                raise DMDerror('DMD reply has error flag set!')
         else:
             answer = None
         return parse_reply(answer)
@@ -434,7 +429,7 @@ class dmd():
         self.current_mode = self.display_modes_inv[ans[-1][0]]
         return self.current_mode
     
-## functions for setting Pattern Display LUT (section 2.4.4.3)
+### functions for setting Pattern Display (and LUT) (section 2.4.4.3)
 
     def start_pattern(self):
         """
@@ -571,7 +566,7 @@ class dmd():
         """Flip image along the long axis"""
         self.send_command('w',0,0x1008,[flip])
 
-    def set_flip_longaxis(self) -> bool:
+    def get_flip_longaxis(self) -> bool:
         """Check whether image is flipped along the long axis"""
         answer = self.send_command('r',0,0x1008)
         return answer[-1][0] > 0
@@ -580,145 +575,7 @@ class dmd():
         """Flip image along the short axis"""
         self.send_command('w',0,0x1009,[flip])
 
-    def set_flip_longaxis(self) -> bool:
+    def get_flip_shortaxis(self) -> bool:
         """Check whether image is flipped along the short axis"""
         answer = self.send_command('r',0,0x1009)
         return answer[-1][0] > 0
-
-## pattern on the fly commands
-
-    def definepattern(self,index,exposure,bitdepth,color,triggerin,darktime,triggerout,patind,bitpos):
-        payload=[]
-        index=number_to_bits(index,16)
-        index=bits_to_bytes(index)
-        for i in range(len(index)):
-            payload.append(index[i])
-
-        exposure=number_to_bits(exposure,24)
-        exposure=bits_to_bytes(exposure)
-        for i in range(len(exposure)):
-            payload.append(exposure[i])
-        optionsbyte=''
-        optionsbyte+='1'
-        bitdepth=number_to_bits(bitdepth-1,3)
-        optionsbyte=bitdepth+optionsbyte
-        optionsbyte=color+optionsbyte
-        if triggerin:
-            optionsbyte='1'+optionsbyte
-        else:
-            optionsbyte='0'+optionsbyte
-
-        payload.append(bits_to_bytes(optionsbyte)[0])
-
-        darktime=number_to_bits(darktime,24)
-        darktime=bits_to_bytes(darktime)
-        for i in range(len(darktime)):
-            payload.append(darktime[i])
-
-        triggerout=number_to_bits(triggerout,8)
-        triggerout=bits_to_bytes(triggerout)
-        payload.append(triggerout[0])
-
-        patind=number_to_bits(patind,11)
-        bitpos=number_to_bits(bitpos,5)
-        lastbits=bitpos+patind
-        lastbits=bits_to_bytes(lastbits)
-        for i in range(len(lastbits)):
-            payload.append(lastbits[i])
-
-
-
-        self.send_command('w',0x00,0x1a34,payload)
-        self.check_for_errors()
-
-    def setbmp(self,index,size):
-        payload=[]
-
-        index=number_to_bits(index,5)
-        index='0'*11+index
-        index=bits_to_bytes(index)
-        for i in range(len(index)):
-            payload.append(index[i]) 
-
-
-        total=number_to_bits(size,32)
-        total=bits_to_bytes(total)
-        for i in range(len(total)):
-            payload.append(total[i])         
-        
-        self.send_command('w',0x00,0x1a2a,payload)
-        self.check_for_errors()
-
-    def bmpload(self,image,size):
-        """
-        bmp loading function, divided in 56 bytes packages
-        max  hid package size=64, flag bytes=4, usb command bytes=2
-        size of package description bytes=2. 64-4-2-2=56
-        """
-
-        packnum=size//504+1
-
-        counter=0
-
-        for i in range(packnum):
-            if i %100==0:
-                print (i,packnum)
-            payload=[]
-            if i<packnum-1:
-                leng=number_to_bits(504,16)
-                bits=504
-            else:
-                leng=number_to_bits(size%504,16)
-                bits=size%504
-            leng=bits_to_bytes(leng)
-            for j in range(2):
-                payload.append(leng[j])
-            for j in range(bits):
-                payload.append(image[counter])
-                counter+=1
-            self.send_command('w',0x11,0x1a2b,payload)
-
-
-            self.check_for_errors()
-
-    def defsequence(self,images,exp,ti,dt,to,rep):
-
-        self.stopsequence()
-
-        arr=[]
-
-        for i in images:
-            arr.append(i)
-
-        num=len(arr)
-
-        encodedimages=[]
-        sizes=[]
-
-        for i in range((num-1)//24+1):
-            print ('merging...')
-            if i<((num-1)//24):
-                imagedata=arr[i*24:(i+1)*24]
-            else:
-                imagedata=arr[i*24:]
-            print ('encoding...')
-            imagedata,size=encode(imagedata)
-
-            encodedimages.append(imagedata)
-            sizes.append(size)
-
-            if i<((num-1)//24):
-                for j in range(i*24,(i+1)*24):
-                    self.definepattern(j,exp[j],1,'111',ti[j],dt[j],to[j],i,j-i*24)
-            else:
-                for j in range(i*24,num):
-                    self.definepattern(j,exp[j],1,'111',ti[j],dt[j],to[j],i,j-i*24)
-
-        self.configurelut(num,rep)
-
-        for i in range((num-1)//24+1):
-        
-            self.setbmp((num-1)//24-i,sizes[(num-1)//24-i])
-
-            print ('uploading...')
-            self.bmpload(encodedimages[(num-1)//24-i],sizes[(num-1)//24-i])
