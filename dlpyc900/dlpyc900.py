@@ -565,6 +565,26 @@ class dmd():
         else:
             return "undocumented state"
 
+## Image flips (section 2.3.4)
+
+    def set_flip_longaxis(self,flip:bool):
+        """Flip image along the long axis"""
+        self.send_command('w',0,0x1008,[flip])
+
+    def set_flip_longaxis(self) -> bool:
+        """Check whether image is flipped along the long axis"""
+        answer = self.send_command('r',0,0x1008)
+        return answer[-1][0] > 0
+
+    def set_flip_shortaxis(self,flip:bool):
+        """Flip image along the short axis"""
+        self.send_command('w',0,0x1009,[flip])
+
+    def set_flip_longaxis(self) -> bool:
+        """Check whether image is flipped along the short axis"""
+        answer = self.send_command('r',0,0x1009)
+        return answer[-1][0] > 0
+
 ## pattern on the fly commands
 
     def definepattern(self,index,exposure,bitdepth,color,triggerin,darktime,triggerout,patind,bitpos):
