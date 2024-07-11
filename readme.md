@@ -1,85 +1,57 @@
+# dlpyc900
 
-This is all based on https://www.ti.com/lit/ug/dlpu018j/dlpu018j.pdf
+This is a Python module for controlling Texas-instrument DMD's with a DLPC900 controller, based on the USB-interface described in the [user manual](https://www.ti.com/lit/ug/dlpu018j/dl).
 
-Pycrafter 6500 is a native Python controller for Texas Instruments' dlplcr6500evm evaluation module for DLP displays.
-The script is compatible with Python 2.x, and should work up to version 3.8 thanks to the kind controbution of Guangyuan Zhao (https://github.com/zhaoguangyuan123). 
-The script requires Pyusb and Numpy to be present in your Python environment. The test script included requires the Python Image Library (PIL or pillow) for opening a test image. The device must have libusb drivers installed, for Windows users we suggest to install them= through Zadig (http://zadig.akeo.ie/), and selecting the libusb_win32 driver.
+## Example code
 
-If you use this library for scientific publications, please consider mentioning the library and citing our work (https://doi.org/10.1364/OE.25.000949).
+Below some random commands you can give.
 
-Special thanks to Ashu (@e841018) for contributing a fast encoder to the library, providing a great speedup to the process of loading images to the device.
+``` python
+import dlpyc900
+dlp = dlpyc900.dmd()           # open connection
+print(f"DMD model is {dlp.get_hardware()[0]}")
+print(dlp.get_main_status())   # Check if all is ok with the device
+dlp.set_display_mode('video')  # Set display mode to video
+dlp.set_port_clock_definition(2,0,0,0) # Dual pixel mode
+dlp.set_input_source(0,0)      # Switch to parallel interface input source
+dlp.lock_displayport()         # Lock to the displayport input source
+dlp.standby()                  # go into standby mode
+# etc. etc.
+```
 
-Features list:
+Note that *not all commands are available via the module yet*. I can do what I want (that is, using the DMD as a videoprojector basically), so expanding this module further is a waste of time for me. However, if you can do some programming, it should be relatively straightforward to add new commands ([see here](./example/readme.md), contributions are welcome!), or you can ask me to implement them by opening an issue.
 
-- basic control of the evaluation module (modes selection, idle toggle, start/pause/stop sequences)
-- upload of a sequence of EXCLUSIVELY BINARY images for "patterns on the fly" mode, with independent control of exposure times, dark times, triggers and repetitions number.
+## Supported models
 
-Quick commands list:
+I only use the DLP9000 DMD, but in principle at least the following DMDs should also be supported:
 
-to open a connection with the DMD:
+- DLP6500
+- DLP9000
+- DLP670S
+- DLP500YX
+- DLP5500
 
-import pycrafter6500
-controller=pycrafter6500.dmd()
+## Installation
 
-available functions:
+First, install this module in your Python enviroment. This module is not in the pypi repository (yet), so you can install it directly from github using `pip`, `poetry`, or whatever tool you use. The main dependency of this module is the `pyusb` module.
 
-controller.idle_on()
-#sets the DMD to idle mode
+After that, you need to install new drivers for the DMD device. 
 
+1. Install and open [Zadig](https://zadig.akeo.ie/).
+2. Plug in the usb cable of the DMD.
+3. Select "List all devices" in Zadig.
+4. Select `DLPC900` from the list of devices.
+5. Selected the "libusb-win32" driver.
+6. Pressed the "Replace driver" button, wait for install to complete.
+7. And now try using the module, things should work!
 
-controller.idle_off()
-#wakes the DMD from idle mode
+Note that replacing the driver will make the normal GUI not work anymore! Luckily, you can re-install the old driver any time you want:
 
+1. With the projector connected over USB, to go to device manager.
+2. Uninstall the device connected using the libusb driver; when the confirmation window comes up, make sure to check the box to also remove driver software.
+3. Unplug and replug the USB cable.
+4. The old 'regular' drivers will now be installed, and the GUI can be used again.
 
-controller.standby()
-#sets the DMD to standby
+## Credits
 
-
-controller.wakeup()
-#wakes the DMD from standby
-
-
-controller.reset()
-#resets the DMD
-
-
-controller.changemode(mode)
-#changes the dmd operating mode:
-#mode=0 for normal video mode
-#mode=1 for pre stored pattern mode
-#mode=2 for video pattern mode
-#mode=3 for pattern on the fly mode
-
-
-controller.startsequence()
-controller.pausesequence()
-controller.stopsequence()
-
-
-controller.defsequence(images,exposures,trigger in,dark time,trigger out, repetitions)
-
-defines a sequence for pattern on the fly mode. Inputs are:
-
-images: python list of numpy arrays, with size (1080,1920), dtype uint8, and filled with binary values (1 and 0 only)
-exposures: python list or numpy array with the exposure times in microseconds of each image. Length must be equal to the images list.
-trigger in: python list or numpy array of boolean values determing wheter to wait for an external trigger before exposure. Length must be equal to the images list.
-dark time: python list or numpy array with the dark times in microseconds after each image. Length must be equal to the images list.
-trigger out: python list or numpy array of boolean values determing wheter to emit an external trigger after exposure. Length must be equal to the images list.
-repetitions: number of repetitions of the sequence. set to 0 for infinite loop.
-
-## install requirements
-
-To use, use libusb driver:
-- plugged in the usb cable
-- opened Zadig
-- Selected "List all devices"
-- Select DLPC900
-- Selected the "libusb-win32" driver
-- Pressed the "Replace driver" button
-- run the Python script
-
-Howerver, normal gui CANNOT work anymore if you do that.
-
-To go back to normal control:
-Hi Bow,
-I came back to this problem and managed to get the GUI working again. The way to do was, with the projector connected over USB, to go to device manager and uninstall the libusb driver, but when the confirmation window comes up, to make sure to check the box to also remove driver software. Afterwards, unplugging and replugging the USB cable properly installed the USB driver to work with LCR4500 GUI.
+I forked this module from the code from [ppozzi](https://github.com/csi-dcsc/Pycrafter6500), but I added quite a few extra functions which I needed, and added a lot of documentation. I removed the on-the-fly capabilities, because I dod not want to spend time understanding them, and I did not need them, but they should be easy to re-add.
