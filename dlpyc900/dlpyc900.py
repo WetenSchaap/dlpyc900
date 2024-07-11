@@ -28,7 +28,7 @@ def bits_to_bools(a : str) -> tuple[int,...]:
     """Convert str of bits ('01101') to tuple of ints (0,1,1,0,1)"""
     return tuple(map(int,a))
 
-def parse_reply( reply : array.array[bool,int,int,int,tuple[int,...]] ):
+def parse_reply( reply : tuple[bool,int,int,int,tuple[int,...]] ):
     """
     Split up the reply of the DMD into its constituant parts:
     (error_flag, flag_byte, sequence_byte, length, data)
