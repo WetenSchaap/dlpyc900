@@ -326,6 +326,8 @@ class dmd():
         Switch input source for the DMD. You can choose the parallel interface (HDMI/displayport/etc), flash memory, test, or a solid wall of light (a 'curtain').
         See page 35 of user guide.
 
+        See also get_input_source
+
         Parameters
         ----------
         source : int, optional
@@ -336,7 +338,24 @@ class dmd():
         payload = 0
         payload |= source & 0x07
         payload |= (bitdepth & 0x03) << 3
-        self.send_command('w',1,0x1A00,payload)
+        self.send_command('w', 1, 0x1A00, [payload])
+
+    def get_input_source(self) -> tuple[int,int]:
+        """
+        Read which input source is currently used.
+
+        Returns
+        -------
+        tuple[int,int]
+            source, bitdepth. See set_input_source doc for their definitions.
+        """
+        seq_byte = 112
+        answer = self.send_command('r', seq_byte, 0x1A00, [])
+        assert answer[2] == seq_byte, "received answer does not match command issued"
+        data = answer[-1][0]
+        source = data & 0x07
+        bitdepth = (data >> 3) & 0x03
+        return source, bitdepth
 
     def lock_displayport(self):
         """
@@ -452,7 +471,7 @@ class dmd():
         payload = byte_01 + byte_25
         self.send_command('w', 1 ,0x1A31, payload)
 
-    def setup_pattern_LUT_definition(self, pattern_index:int = 0, disable_pattern_2_trigger_out:bool = False, extended_bit_depth:bool = False, exposuretime:int = 15000, darktime:int = 0, color:int = 1, bitdepth:int = 8, image_pattern_index:int = 0, bit_position:int = 1):
+    def setup_pattern_LUT_definition(self, pattern_index:int = 0, disable_pattern_2_trigger_out:bool = False, extended_bit_depth:bool = False, exposuretime:int = 15000, darktime:int = 0, color:int = 1, bitdepth:int = 8, image_pattern_index:int = 0, bit_position:int = 0):
         """
         Add a pattern to the Look Up Table (LUT), see section 2.4.4.3.5.
         
@@ -460,6 +479,10 @@ class dmd():
         ----------
         pattern_index : int, optional, defaults to 0
             location in memory to store pattern, should be between 0 and 399.
+        disable_pattern_2_trigger_out: bool, defauts False
+            Whether to disable trigger 2 output for this pattern
+        extended_bit_depth : bool, defaults False
+            Whether to enable the extended bit depth
         exposuretime : int, optional, in µs
             on-time of led in a 60hz period flash, by default 15000 µs
         darktime : int, optional, in µs
@@ -472,8 +495,6 @@ class dmd():
             index of image pattern to use (if applicable), by default 0
         bit_position : int, optional
             Bit position in the image pattern (Frame in video pattern mode). Valid range 0-23. Defaults to 0.
-        
-        A few other parameters are there as well, but I don't need them/did not look into them, so they are simply set to 1.
         """
         disable_pattern_2_trigger_out,extended_bit_depth = int(disable_pattern_2_trigger_out),int(extended_bit_depth)
         clear_after_exposure, wait_for_trigger = 0,0
