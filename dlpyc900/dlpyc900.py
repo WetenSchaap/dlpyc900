@@ -1,40 +1,7 @@
 """
 Content of this file is based on Pycrafter 6500 repo, as well as the [dlpc900 user guide](http://www.ti.com/lit/pdf/dlpu018). Some docstrings contain references to pages in this guide.
 
-In general, all commands and replies have the same structure:
-
-byte 0: report ID, set to 0
-## Header bytes
-byte 1: flag byte
-    bit 7: read/write
-    bit 6: reply
-    bit 5: error
-    bit 4:3: reserved
-    bit 2:1: destination
-byte 2: sequence byte - replies to a message will match sequence bytes of it
-byte 3: Length LSB - number of bytes in payload
-byte 4: Length MSB - number of bytes in payload
-## Payload bytes
-byte 5 onward: At least the USB command, followed by any data.
-
-Weirdly, byte 0 is not actually given in the replies from the device as far as I can tell, so remember that when parsing.
-
-To construct a new command, use the manual to find the USB command, lets call this `command`, and what payload is required. If only one input parameter is required in one byte, you can simply use:
-    self.send_command('w', <random number>, command, [input])
-If more, you need to make it a bit more complicated. As an example:
-byte 0 - bit 1:0 : nr between 0 and 3
-       - bit 3:2 : nr between 0 and 3
-       - bit 4: 0 or 1
-       - bit 5: 0 or 1
-       - bit 7:6 reserved.
-Needs the following:
-    payload = 0
-    payload |= 2 & 0x03            # mask input so only the correct bits are used
-    payload |= (0 & 0x03) << 2     # shift to not override.
-    payload |= (0 & 0x01) << 4
-    payload |= (0 & 0x01) << 5
-    self.send_command('w', <random number>, command, payload)
-the mask is 0x01 for one bit, 0x03 for 2 bits, 0x07 for 3 bits, 0x015 for 4 bits, etc. (1,11,111,1111, etc). The shift should be the first bit the number starts on (so if the guide says 4:3, shift needs to be 3)
+Please see the example folder in this repo, which explains a bit more how this works (because I keep forgetting).
 """
 
 import usb.core
@@ -117,7 +84,7 @@ class dmd():
         :param mode: 'r' for read, 'w' for write
         :param sequence_byte: A byte to identify the command sequence, so you know what reply belongs to what command. Choose arbitrary number, like 0x00. do not re-use.
         :param command: The command to be sent (16-bit integer), so for instance '0x0200'
-        :param data: List of data bytes associated with the command. Often just one to set a mode, e.g. [1] for option 1.
+        :param data: List of data bytes associated with the command. Often just one to set a mode, e.g. [1] for option 1. If more complex, you need to craft the bytes yourself.
         
         In all these cases you can give the hexidecimal number (like 0x1A1B) or the normal one (6683), Python does not care.
         """
@@ -311,14 +278,48 @@ class dmd():
         print(error_message)
 
 ## functions for parallel interface (to lock an external source) (section 2.3)
-    def set_dual_pixel_mode(self):
-        """Enable dual pixel mode. See page 35 of user manual."""
+    def set_port_clock_definition(self, data_port:int, px_clock:int, data_enable:int, vhsync:int):
+        """
+        This command selects which port(s) the RGB data is on and which pixel clock, data enable, and syncs to use.
+
+        See also get_port_clock_definition
+        
+        Parameters
+        ----------
+        data_port : int
+            0: use data port 1, 1: use data port 2, 2: use port 1-2 dual px, 3: use port 2-1 dual px.
+        px_clock : int
+            0: pixel clock 1, 1: use pixel clock 2, 3: use pixel clock 3
+        data_enable : int
+            0: data enable 1, 1: data enable 2
+        vhsync : int
+            0: P1 VSync & P1 HSync, 1: P2 VSync & P2 HSync
+        """
         payload = 0
-        payload |= 2 & 0x03
-        payload |= (0 & 0x03) << 2
-        payload |= (0 & 0x01) << 4
-        payload |= (0 & 0x01) << 5
-        self.send_command('w', 2, 0x1A03, payload)
+        payload |= data_port & 0x03
+        payload |= (px_clock & 0x03) << 2
+        payload |= (data_enable & 0x01) << 4
+        payload |= (vhsync & 0x01) << 5
+        self.send_command('w', 2, 0x1A03, [payload])
+
+    def get_port_clock_definition(self) -> tuple[int,int,int,int]:
+        """
+        Read which port(s) the RGB data is on and which pixel clock, data enable, and syncs is used.
+
+        Returns
+        -------
+        tuple[int,int,int,int]
+            data_port, px_clock, data_enable, vhsync. See set_port_clock_definition doc for their definitions.
+        """
+        seq_byte = 243
+        answer = self.send_command('r', seq_byte, 0x1A03, [])
+        assert answer[2] == seq_byte, "received answer does not match command issued"
+        data = answer[-1][0]
+        data_port = data & 0x03
+        px_clock = (data >> 2) & 0x03
+        data_enable = (data >> 4) & 0x01
+        vhsync = (data >> 5) & 0x01
+        return data_port, px_clock, data_enable, vhsync
 
     def set_input_source(self, source:int=0, bitdepth:int=0):
         """
@@ -333,8 +334,8 @@ class dmd():
             Bit depth for the parallel interface, with: 0 30-bits, 1 24-bits, 2 20-bits, 3 16-bits, by default 0
         """
         payload = 0
-        payload |= 0 & 0x07
-        payload |= (0 & 0x03) << 3
+        payload |= source & 0x07
+        payload |= (bitdepth & 0x03) << 3
         self.send_command('w',1,0x1A00,payload)
 
     def lock_displayport(self):
@@ -364,7 +365,7 @@ class dmd():
         self.send_command('w',0,0x1A01,[0])
         self.set_input_source()
 
-    def check_source_lock(self) -> int:
+    def get_source_lock(self) -> int:
         """Check if the source is locked, and if yes, via HDMI or DisplayPort. Returns 0 if not locked, 1 if HDMI, 2 if DisplayPort."""
         locked = self.get_main_status()[3]
         if locked:
@@ -495,7 +496,7 @@ class dmd():
         image_pattern_index_bytes = [(image_pattern_index & 0xFF), ((image_pattern_index >> 8) & 0xFF)]
         bit_postion_byte = (bit_position & 0x1F) << 3
         byte_10_11 = [image_pattern_index_bytes[0], (image_pattern_index_bytes[1] | bit_postion_byte)]
-        payload = list(pattern_index_bytes + exposuretime_bytes + byte_5 + darktime_bytes + byte_9 + byte_10_11)
+        payload = pattern_index_bytes + exposuretime_bytes + [byte_5] + darktime_bytes + [byte_9] + byte_10_11
         self.send_command('w', 1, 0x1A34, payload)
 
 ## functions for power management (section 2.3.1.1 & 2.3.1.2)
