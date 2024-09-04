@@ -109,7 +109,12 @@ class dmd():
         if len(buffer) + len(payload) < 65:
             buffer.extend(payload)
             buffer.extend([0x00] * (64 - len(buffer)))
-            self.dev.write(1, buffer)
+            try:
+                self.dev.write(1, buffer)
+            except usb.USBError:
+                # sometimes timouts occur. If that happens, just wait a very short time and rerun, that will fix the issue in a good 90% of the cases.
+                time.sleep(0.1)
+                self.dev.write(1, buffer)
         else:
             remaining_data = payload
             buffer.extend(remaining_data[:58])
@@ -121,7 +126,12 @@ class dmd():
                 remaining_data = remaining_data[64:]
                 if len(chunk) < 64:
                     chunk.extend([0x00] * (64 - len(chunk)))
-                self.dev.write(1, chunk)
+                try:
+                    self.dev.write(1, chunk)
+                except usb.USBError:
+                    # sometimes timouts occur. If that happens, just wait a very short time and rerun, that will fix the issue in a good 90% of the cases.
+                    time.sleep(0.1)
+                    self.dev.write(1, chunk)
         # read reply if required
         if mode == 'r':
             time.sleep(0.1) # give it some processing time...
