@@ -1,11 +1,12 @@
-import dlpyc900.dlpyc900 as dlpyc900
 
 #%% test reading some properties
+import dlpyc900.dlpyc900 as dlpyc900
+
 dlp=dlpyc900.dmd()
 print(dlp.get_display_mode())
 print(f"DMD model is {dlp.get_hardware()[0]}")
 print(dlp.get_main_status())
-print(dlp.get_hardware_status())
+print(dlp.get_hardware_status()[0])
 print(dlp.get_current_powermode())
 
 #%% setup video mode
