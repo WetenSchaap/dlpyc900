@@ -1,161 +1,348 @@
-'''
-copied from this repository
-https://github.com/e841018/ERLE
-
-@author Ashu
-'''
-
-# encode image of shape (n<=24, 1080, 1920) with Enhanced Run-Length Encoding (ERLE) described in http://www.ti.com/lit/pdf/dlpu018
-
-import numpy as np
 import struct
-pack32be = struct.Struct('>I').pack  # uint32 big endian
+import numpy as np
+from PIL import Image
+from typing import Tuple
 
+def _enc128(num: int) -> bytearray:
+    """
+    Encodes a number (up to 32767) into 1 or 2 bytes using the variable-length 
+    integer scheme specified in the TI documentation.
+    """
+    if num >= 0 and num < 128:
+        return bytearray([num])
+    else:
+        return bytearray([(num & 0x7f) | 0x80, num >> 7])
 
-def get_header():
-    '''
-    generate header defined in section 2.4.2
-    '''
-    header = bytearray(0)
-    # signature
-    header += bytearray([0x53, 0x70, 0x6c, 0x64])
-    # width
-    header += bytearray([1920 % 256, 1920//256])
-    # height
-    header += bytearray([1080 % 256, 1080//256])
-    # number of bytes, will be overwritten later
-    header += bytearray(4)
-    # reserved
-    header += bytearray([0xff]*8)
-    # background color (BB GG RR 00)
-    header += bytearray(4)
-    # reserved
-    header.append(0)
-    # compression, 0=Uncompressed, 1=RLE, 2=Enhanced RLE
-    header.append(2)
-    # reserved
-    header.append(1)
-    header += bytearray(21)
-    return header
+def _parse_enc128(data: bytes, index: int) -> Tuple[int, int]:
+    """
+    Parses a variable-length integer from the byte stream at the given index.
+    Returns a tuple (value, new_index).
+    """
+    if index >= len(data):
+        raise ValueError("Unexpected end of data while parsing length.")
 
-header_template = get_header()
+    val = data[index]
+    if val & 0x80:
+        # 2-byte integer
+        if index + 1 >= len(data):
+            raise ValueError("Unexpected end of data while parsing length.")
+        low = val & 0x7f
+        high = data[index + 1]
+        return (low | (high << 7)), index + 2
+    else:
+        # 1-byte integer
+        return val, index + 1
 
+def _encode_row(row: np.ndarray, prev_row: np.ndarray) -> bytearray:
+    """
+    Encodes a single row using the TI Enhanced RLE logic.
+    """
+    width = len(row)
+    compressed = bytearray()
 
-def merge(images):
-    '''
-    merge up to 24 binary images into a single 24-bit image, each pixel is an uint32 of format 0x00BBGGRR
-    '''
-    image32 = np.zeros((1080, 1920), dtype=np.uint32)
-    n_img = len(images)
-    batches = [8]*(n_img//8)
-    if n_img % 8:
-        batches.append(n_img % 8)
-    for i, batch_size in enumerate(batches):
-        image8 = np.zeros((1080, 1920), dtype=np.uint8)
-        for j in range(batch_size):
-            image8 += images[i*8+j]*(1 << j)
-        image32 += image8*(1 << (i*8))
-    return image32
+    # Create boolean masks for optimization
+    # same_prev: True if pixel is same as in previous row
+    if prev_row is None:
+        same_prev = np.zeros(width, dtype=bool)
+    else:
+        same_prev = (row == prev_row)
 
-
-def bgr(pixel):
-    '''
-    convert an uint32 pixel into [B, G, R] bytes
-    '''
-    return pack32be(pixel)[1:4]
-
-
-def enc128(num):
-    '''
-    encode num (up to 32767) into 1 or 2 bytes
-    '''
-    return bytearray([(num & 0x7f) | 0x80, num >> 7]) if num >= 128 else bytearray([num])
-
-
-def run_len(row, idx):
-    '''
-    find the length of the longest run starting from idx in row
-    '''
-    stride = 128
-    length = len(row)
-    j = idx
-    while j < length and row[j]:
-        if j % stride == 0 and np.all(row[j:j+stride]):
-            j += min(stride, length-j)
-        else:
-            j += 1
-    return j-idx
-
-
-def encode_row(row, same_prev):
-    '''
-    encode a row of length 1920 with the format described in section 2.4.3.2
-    '''
-    # bool array indicating if same as previous row, shape = (1920, )
-#     same_prev = np.zeros(1920, dtype=bool) if i==0 else image[i]==image[i-1]
-    # bool array indicating if same as next element, shape = (1919, )
-    same = np.logical_not(np.diff(row))
-    # same as previous row or same as next element, shape = (1919, )
-    same_either = np.logical_or(same_prev[:1919], same)
+    # same: True if pixel is same as next pixel (horizontal redundancy)
+    # This array has size width - 1 (compare i with i+1)
+    if width > 1:
+        same = (row[:-1] == row[1:])
+        # same_either: True if pixel is same as prev OR same as next
+        # We compare same_prev[i] with same[i] for i from 0 to width-2
+        same_either = np.logical_or(same_prev[:-1], same)
+    else:
+        same = np.zeros(0, dtype=bool)
+        same_either = np.zeros(0, dtype=bool)
 
     j = 0
-    compressed = bytearray(0)
-    while j < 1920:
-
-        # copy n pixels from previous line
+    while j < width:
+        # 1. Copy n pixels from previous line
+        # Command: 0x00 0x01 [encoded n]
         if same_prev[j]:
-            r = run_len(same_prev, j+1) + 1
-            j += r
-            compressed += b'\x00\x01' + enc128(r)
+            run_len = 1
+            while j + run_len < width and same_prev[j + run_len]:
+                run_len += 1
 
-        # repeat single pixel n times
-        elif j < 1919 and same[j]:
-            r = run_len(same, j+1) + 2
-            j += r
-            compressed += enc128(r) + bgr(row[j-1])
+            compressed += b'\x00\x01'
+            compressed += _enc128(run_len)
+            j += run_len
 
-        # single uncompressed pixel
-        elif j > 1917 or same_either[j+1]:
-            compressed += b'\x01' + bgr(row[j])
+        # 2. Repeat single pixel n times
+        # Command: [encoded n] [B G R]
+        elif j < width - 1 and same[j]:
+            start_j = j
+            run_len = 2
+            # Count repeated pixels
+            while j + run_len < width:
+                # Check if row[j+run_len-1] == row[j+run_len]
+                # We use the 'same' array which stores comparisons.
+                # same[index] is True if row[index] == row[index+1]
+                if same[j + run_len - 1]:
+                    run_len += 1
+                else:
+                    break
+
+            # Emit command
+            compressed += _enc128(run_len)
+
+            # Emit pixel bytes (B, G, R)
+            pixel_bytes = struct.pack('>I', row[j])[1:4]
+            compressed += pixel_bytes
+            j += run_len
+
+        # 3. Single uncompressed pixel
+        # Command: 0x01 [B G R]
+        elif j >= width - 2 or same_either[j]:
+            compressed += b'\x01'
+            pixel_bytes = struct.pack('>I', row[j])[1:4]
+            compressed += pixel_bytes
             j += 1
 
-        # multiple uncompressed pixels
+        # 4. Multiple uncompressed pixels
+        # Command: 0x00 [encoded n] [B G R ...]
         else:
-            j_start = j
-            pixels = bgr(row[j]) + bgr(row[j+1])
-            j += 2
-            while j == 1919 or not same_either[j]:
-                pixels += bgr(row[j])
+            start_j = j
+            # Find sequence of unique pixels
+            pixels = bytearray()
+            pixels.extend(struct.pack('>I', row[j])[1:4])
+            j += 1
+
+            # Continue while we have space and no horizontal repetition or vertical matching
+            while j < width - 1 and not same_either[j]:
+                pixels.extend(struct.pack('>I', row[j])[1:4])
                 j += 1
-            compressed += b'\x00' + enc128(j-j_start) + pixels
 
-    return compressed + b'\x00\x00'
+            # Add the last pixel of the sequence (if we stopped early due to a repeat)
+            # Note: If loop stopped because j reached width-1, we need to add that last pixel too
+            # But logic above: "while j < width - 1 ..." stops AT width-2.
+            # So we must handle the final pixel.
+            if j < width:
+                pixels.extend(struct.pack('>I', row[j])[1:4])
+                j += 1
 
+            count = len(pixels) // 3
+            compressed += b'\x00'
+            compressed += _enc128(count)
+            compressed += pixels
 
-def encode(images):
-    '''
-    encode image with the format described in section 2.4.3.2.1
-    '''
-    # header
-    encoded = bytearray(header_template)
+    # End of Line marker
+    compressed += b'\x00\x00'
+    return compressed
 
-    # uint32 array, shape = (1080, 1920)
-    image = merge(images)
+def _decode_row(payload: bytes, offset: int, prev_row: np.ndarray) -> Tuple[np.ndarray, int]:
+    """
+    Decodes a single row. 
+    Returns (decoded_row_array, new_offset).
+    """
+    decoded_pixels = []
+    while True:
+        if offset >= len(payload):
+            break
+        byte0 = payload[offset]
+        offset += 1
+        if byte0 == 0x00:
+            if offset >= len(payload): break
+            byte1 = payload[offset]
+            offset += 1
+            if byte1 == 0x00:
+                # End of Line
+                break
+            elif byte1 == 0x01:
+                # Copy Previous Line OR End of Image
+                if offset >= len(payload): break
+                byte2 = payload[offset]
+                # Check for End of Image marker (0x00 0x01 0x00)
+                if byte2 == 0x00:
+                    # Rewind offset so caller sees it
+                    offset -= 3
+                    break
+                n, offset = _parse_enc128(payload, offset)
+                # Copy n pixels from prev_row
+                curr_len = len(decoded_pixels)
+                if prev_row is not None:
+                    # Ensure we don't go out of bounds
+                    copy_end = min(curr_len + n, len(prev_row))
+                    decoded_pixels.extend(prev_row[curr_len : copy_end])
+                    if copy_end < curr_len + n:
+                         decoded_pixels.extend([0] * ((curr_len + n) - copy_end))
+                else:
+                    decoded_pixels.extend([0] * n)
+            else:
+                # Literal N Pixels sequence: 0x00 [encoded N] ...
+                # 'offset' points to the byte AFTER byte1.
+                # byte1 is the start of N, so we use offset - 1.
+                n, offset = _parse_enc128(payload, offset - 1)
 
-    # image content
-    for i in range(1080):
-        # bool array indicating if same as previous row, shape = (1920, )
-        same_prev = np.zeros(1920, dtype=bool) if i == 0 else image[i] == image[i-1]
-        encoded += encode_row(image[i], same_prev)
+                if offset + n*3 > len(payload): break
+                pixels_data = payload[offset : offset + n*3]
+                offset += n*3
 
-    # end of image
-    encoded += b'\x00\x01\x00'
+                for k in range(n):
+                    b = pixels_data[k*3]
+                    g = pixels_data[k*3 + 1]
+                    r = pixels_data[k*3 + 2]
+                    val = (b << 16) | (g << 8) | r
+                    decoded_pixels.append(val)
 
-    # pad to 4-byte boundary
-    encoded += bytearray((-len(encoded)) % 4)
+        elif byte0 == 0x01:
+            # Single uncompressed pixel
+            if offset + 2 >= len(payload): break
+            b = payload[offset]
+            g = payload[offset + 1]
+            r = payload[offset + 2]
+            offset += 3
+            val = (b << 16) | (g << 8) | r
+            decoded_pixels.append(val)
 
-    # overwrite number of bytes in header
-    # uint32 little endian, offset=8
-    struct.pack_into('<I', encoded, 8, len(encoded))
+        elif byte0 & 0x80 or byte0 > 1:
+            # Repeat Pixel Run: [encoded N] [B G R]
+            # Backtrack to read N correctly (byte0 is the first byte of N)
+            n, offset = _parse_enc128(payload, offset - 1)
 
-    return encoded, len(encoded)
+            if offset + 2 >= len(payload): break
+            b = payload[offset]
+            g = payload[offset + 1]
+            r = payload[offset + 2]
+            offset += 3
+            val = (b << 16) | (g << 8) | r
+
+            decoded_pixels.extend([val] * n)
+
+    return np.array(decoded_pixels, dtype=np.uint32), offset
+
+def enhanced_rle_encode(image: Image.Image) -> bytes:
+    """
+    Encodes a PIL Image (RGB) into the DLPC900 binary format with Enhanced RLE.
+    """
+    if image.mode != 'RGB':
+        # this can be a bit shady, better just make sure you input an rgb file
+        print("Warning: implicitly converted your non-RGB image to RGB.")
+        image = image.convert('RGB')
+
+    width, height = image.size
+    # Convert to uint32 format 0x00BBGGRR
+    arr = np.array(image)
+    img_uint32 = (arr[:, :, 2].astype(np.uint32) << 16) | \
+                 (arr[:, :, 1].astype(np.uint32) << 8) | \
+                 (arr[:, :, 0].astype(np.uint32))
+
+    encoded_data = bytearray()
+
+    # Header placeholder (48 bytes)
+    encoded_data += bytearray(48)
+
+    prev_row = None
+    for y in range(height):
+        row = img_uint32[y]
+        encoded_data += _encode_row(row, prev_row)
+        prev_row = row
+
+    # End of Image marker
+    encoded_data += b'\x00\x01\x00'
+
+    # Padding to 4-byte boundary
+    pad_len = (-len(encoded_data)) % 4
+    encoded_data += bytearray(pad_len)
+
+    # Fill Header
+    encoded_data[0:4] = b'Spld' # i wonder what spld stands for
+    struct.pack_into('<H', encoded_data, 4, width)
+    struct.pack_into('<H', encoded_data, 6, height)
+    struct.pack_into('<I', encoded_data, 8, len(encoded_data) - 48)
+    encoded_data[12:20] = b'\xFF' * 8
+    encoded_data[20:24] = b'\x00\x00\x00\x00' 
+    encoded_data[24] = 0x00
+    encoded_data[25] = 0x02 # Enhanced RLE
+    encoded_data[26] = 0x01
+    # Rest 0
+
+    return bytes(encoded_data)
+
+def enhanced_rle_decode(data: bytes) -> Image.Image:
+    """
+    Decodes DLPC900 Enhanced RLE byte stream back to a PIL Image.
+    """
+    if len(data) < 48:
+        raise ValueError("Data too short.")
+
+    width = struct.unpack('<H', data[4:6])[0]
+    height = struct.unpack('<H', data[6:8])[0]
+    payload_size = struct.unpack('<I', data[8:12])[0]
+
+    payload = data[48 : 48 + payload_size]
+
+    decoded_rows = []
+    offset = 0
+    prev_row = None
+
+    # We know the target width, so we can reconstruct rows accurately
+    while offset < len(payload):
+        # Check for End of Image marker
+        if offset + 2 < len(payload) and payload[offset] == 0x00 and payload[offset+1] == 0x01 and payload[offset+2] == 0x00:
+            break
+
+        row, offset = _decode_row(payload, offset, prev_row)
+
+        # Ensure the row matches the header width
+        if len(row) < width:
+            padded = np.zeros(width, dtype=np.uint32)
+            padded[:len(row)] = row
+            decoded_rows.append(padded)
+        elif len(row) > width:
+            decoded_rows.append(row[:width])
+        else:
+            decoded_rows.append(row)
+
+        prev_row = decoded_rows[-1] # Use padded row for next iteration ref
+
+    # Convert to Image
+    img_arr = np.zeros((len(decoded_rows), width, 3), dtype=np.uint8)
+
+    for y, row in enumerate(decoded_rows):
+        img_arr[y, :, 0] = (row >> 0) & 0xFF
+        img_arr[y, :, 1] = (row >> 8) & 0xFF
+        img_arr[y, :, 2] = (row >> 16) & 0xFF
+
+    return Image.fromarray(img_arr, 'RGB')
+
+def compression_round_trip(image: Image.Image):
+    """
+    Performs encoding and decoding to verify all is ok.
+    """
+    original_data = image.tobytes()
+    original_size = len(original_data)
+
+    print("Encoding image...")
+    compressed = enhanced_rle_encode(image)
+    compressed_size = len(compressed)
+
+    print("Decoding image...")
+    decompressed = enhanced_rle_decode(compressed)
+    decompressed_data = decompressed.tobytes()
+
+    if original_data == decompressed_data:
+        integrity_check = "PASSED"
+    else:
+        integrity_check = "FAILED (Data Mismatch)"
+
+    if original_size > 0:
+        ratio = compressed_size / original_size
+        saved = (1 - ratio) * 100
+
+        print("-" * 40)
+        print(f"Dimensions:          {image.size[0]}x{image.size[1]}")
+        print(f"Original Size:       {original_size:,} bytes")
+        print(f"Compressed Size:     {compressed_size:,} bytes")
+        print(f"Compression Ratio:   {ratio:.4f}")
+        print(f"Space Saved:         {saved:.2f}%")
+        print(f"Integrity Check:     {integrity_check}")
+        print("-" * 40)
+
+    # Visual Check
+    print("Displaying images...")
+    image.show(title="Original Image")
+    decompressed.show(title="Decompressed Image")
